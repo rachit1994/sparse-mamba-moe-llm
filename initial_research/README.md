@@ -10,6 +10,24 @@ $ python3 verify_math.py    → exit 0
 
 ---
 
+> ## ⚠️ ARCHITECTURE REVERSED — read [10_dynamic_substrate.md](10_dynamic_substrate.md) first
+>
+> Docs 01–09 optimised a premise that had been quietly replaced: they built an **external memory
+> bank** (storage + lookup) instead of a **fixed dynamic substrate** (patterns + interaction), which
+> is what the original proposal actually claims.
+>
+> One measurement reversed it. Allen-Zhu & Li: **2 bits per parameter**, and a 7B model already
+> exceeds English Wikipedia + textbooks. A fixed brain in **6.5 GB of RAM holds 52 Gbit — 3.7×
+> Wikipedia+textbooks — at 84 GB/s.** The old design put 97% of parameters on SSD at 3 GB/s: **the
+> tier that is 28× slower**, to solve a capacity problem that mostly did not exist.
+>
+> **Now:** dynamics-first, everything in RAM, external store is a *conditional overflow tier*.
+> Disk drops from 200 GB to ~5–20 GB, no hardware purchase is needed, and time-to-first-signal
+> drops from 3–6 months to **~2 weeks**.
+>
+> Docs 01–03 (feasibility, math, prior art) remain valid. 04 is rewritten. 09 is authoritative on
+> *mechanism*, superseded on *tier*.
+
 ## The verdict, in one paragraph
 
 **Yes — but only if ~97% of those parameters are *written* rather than *trained*, and only if "one
@@ -44,8 +62,9 @@ target must be earned. See [09](09_method_comparison_and_decision.md).
 | 02 | [Math corrections to the root README](02_math_corrections.md) | Three quantitative claims in `/README.md` are wrong or misleading. One by 52.8 orders of magnitude. |
 | 03 | [Prior art the proposal is missing](03_prior_art.md) | Lines of work absent from the proposal, including the two that make it possible. |
 | **08** | **[Who tried this, what code exists, what they learned](08_prior_attempts_and_code.md)** | **Five labs, four codebases. Google's PLE in production. Why product-key memory stalled for a decade — and what fixed it.** |
-| **09** | **[Method comparison and decision](09_method_comparison_and_decision.md)** | **Seven mechanisms compared; the choice, with reasoning. What updates in the main idea and what is preserved.** |
-| 04 | [Architecture specification](04_architecture.md) | The concrete design with a closing byte budget. *Revised by 08/09.* |
+| 09 | [Method comparison and decision](09_method_comparison_and_decision.md) | Seven memory mechanisms compared. Authoritative on *mechanism*; superseded on *tier* by 10. |
+| **10** | **[The dynamic substrate](10_dynamic_substrate.md)** | **THE REVERSAL. Capacity math, the BDH/TTT/Hopfield lineage, and the 2-week experiment that decides the whole programme.** |
+| 04 | [Architecture specification](04_architecture.md) | The dynamics-first design. *Rewritten per 10.* |
 | 05 | [Training & memory population](05_training_and_population.md) | What can be trained here (little), downloaded (the backbone), and written (almost all). |
 | 06 | [Evaluating intelligence](06_evaluation.md) | How to compare against dense baselines — and against RAG — without fooling ourselves. |
 | 07 | [Kill switches](07_kill_switches.md) | Numeric, falsifiable abort conditions. Three of six produce a publishable negative when they fail. |

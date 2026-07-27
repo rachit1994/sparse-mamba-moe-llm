@@ -1,0 +1,82 @@
+
+==========================================================================
+1. PATTERN COUNT vs INFORMATION — the unit error in the root README
+==========================================================================
+C(10000,100)            = 10^241.8   (count of distinguishable patterns)
+log2(C(10000,100))      = 803.3 bits  (payload ONE pattern can carry)
+
+A pattern COUNT is an address space. Its LOG is the storage capacity.
+10^241 patterns is not 10^241 bits of knowledge. It is 803 bits.
+
+Upper bound regardless of encoding: an n-unit substrate holds <= n bits.
+   n=   10,000 units, w=   100 active:  log2(C(n,w)) =        803 bits  | raw ceiling    10,000 bits
+   n=  100,000 units, w= 1,000 active:  log2(C(n,w)) =      8,073 bits  | raw ceiling   100,000 bits
+   n=1,000,000 units, w=10,000 active:  log2(C(n,w)) =     80,785 bits  | raw ceiling 1,000,000 bits
+
+The SDR argument shows ADDRESSING is not the bottleneck. True, and never
+was in dispute. It says nothing about how many BITS can be stored.
+
+==========================================================================
+2. KNOWLEDGE CAPACITY OF A FIXED BRAIN (Allen-Zhu & Li: 2 bits/param)
+==========================================================================
+Weight budget in RAM: 6.5 GB = 52 Gbit
+  ^ this is a HARD information ceiling: you cannot store more bits than you have.
+
+precision   bytes/param      params    2b/param   actual (capped)
+fp16               2.00       3.2B       6.5 Gb          6.5 Gb
+int8               1.00       6.5B      13.0 Gb         13.0 Gb
+int4               0.50      13.0B      26.0 Gb         26.0 Gb
+ternary            0.20      32.5B      65.0 Gb         52.0 Gb  <- storage-bound
+
+NOTE: Allen-Zhu verified 2 bits/param down to int8. Below int8 the law is
+      NOT verified, and the storage bound binds first. Treat int4/ternary
+      rows as UPPER bounds, not measurements. This is gate G-CAP.
+
+==========================================================================
+3. IS THAT ENOUGH? — what the ceiling actually buys
+==========================================================================
+Fixed-brain ceiling in 6.5 GB: 52 Gbit
+
+  Allen-Zhu reference: 7B model           14.0 Gb   FITS
+      they estimate this EXCEEDS English Wikipedia + textbooks combined
+  English Wikipedia + textbooks           14.0 Gb   FITS
+      per the above
+  30B-token web corpus (long tail)       240.0 Gb   SHORT by 4.6x
+      ~4 chars/token, ~2 bits/char compressed
+  300B-token corpus (the Pile)          2400.0 Gb   SHORT by 46.2x
+
+=> CONCLUSION THAT REVERSED THE ARCHITECTURE:
+   A fixed brain resident in RAM holds Wikipedia-scale knowledge with
+   3.7x headroom. The 200 GB external memory bank in the earlier
+   design was over-engineered for anything short of web-scale long tail --
+   and it moved knowledge onto the SLOWEST component in the machine.
+
+==========================================================================
+4. WHERE THE KNOWLEDGE SHOULD LIVE — bandwidth comparison
+==========================================================================
+tier                             bandwidth         holds   relative speed
+fixed brain (RAM)                    84 GB/s         52 Gb             28x
+external bank (SSD)                   3 GB/s      ~1600 Gb              1x
+
+The earlier design put 97% of parameters on the tier that is 28x slower.
+Dynamics-first puts the load-bearing knowledge on the 28x faster tier and
+uses SSD only for what genuinely exceeds the information ceiling.
+
+==========================================================================
+5. THE EXPERIMENT THAT DECIDES IT — knowledge bits per parameter
+==========================================================================
+Allen-Zhu baseline for a standard dense transformer : 2.0 bits/param
+Question nobody has published an answer to:
+  does a dynamic/Hebbian substrate (BDH/TTT-style) beat 2.0 bits/param?
+
+  measured b/param                                       verdict
+             0.5      KILL: dynamics is worse than plain weights
+             1.0  KILL for knowledge; keep dynamics for reasoning only
+             2.0        parity - premise not proven, not refuted
+             3.0                     PREMISE PROVEN, publishable
+             4.0                     PREMISE PROVEN, publishable
+
+Capacity a fixed 6.5 GB brain would hold at each rate (ternary, 32.5B params):
+   1.0 b/param ->  32.5 Gbit =  2.3x Wikipedia+textbooks
+   2.0 b/param ->  52.0 Gbit =  3.7x Wikipedia+textbooks
+   4.0 b/param ->  52.0 Gbit =  3.7x Wikipedia+textbooks

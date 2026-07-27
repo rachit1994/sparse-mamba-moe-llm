@@ -1,202 +1,165 @@
-# 04 — Architecture Specification
+# 04 — Architecture Specification (Dynamics-First)
 
-> **Revised** after the prior-art research in [08](08_prior_attempts_and_code.md) and the method
-> comparison in [09](09_method_comparison_and_decision.md). Where earlier drafts of this file
-> conflict, [09](09_method_comparison_and_decision.md) wins.
+> **Rewritten.** The previous version of this file specified a memory-bank-first architecture with
+> 974B parameters on SSD. [10_dynamic_substrate.md](10_dynamic_substrate.md) reversed that decision on
+> capacity and bandwidth grounds. This file now specifies the dynamics-first architecture; the memory
+> bank survives as a conditional overflow tier.
 >
-> Numbers from `verify_math.py` §8–§9 and `verify_decision.py` §6.
+> Numbers from `verify_capacity.py` and `verify_math.py`.
 
 ---
 
-## 0. What changed from the first draft
+## 0. Revision history of this spec
 
-The first version of this spec was written before the prior-art survey and contained four concrete
-errors. They are recorded rather than silently fixed:
-
-| First draft | Corrected | Source of correction |
+| Version | Design | Why it changed |
 |---|---|---|
-| 8 memory layers | **~3 access points** | Meta: degrades past ~3 |
-| Separate memory pool per layer | **One shared pool** | Meta: shared pool, fixed param count |
-| Learned product keys as primary addressing | **Deterministic n-gram hash** | Prefetchability ([09 §3](09_method_comparison_and_decision.md)) |
-| top-k=128 scattered gather | **Hash lookup + block fetch, two tiers** | ~85× cheaper amortised |
-| 1T parameters as the spec | **Staged; 1T gated on measurement** | Three diminishing-returns results |
+| v1 | Product-key memory, 8 layers, 974B on SSD | 8 layers wrong (Meta: ~3), pools unshared, keys not prefetchable |
+| v2 | Engram hash + block fetch, 974B on SSD | Correct mechanism, **wrong tier** — put 97% of params on the 28×-slower device |
+| **v3 (this)** | **Fixed dynamic substrate in RAM; overflow store conditional** | Capacity math: 6.5 GB RAM holds Wikipedia+textbooks with 3.7× headroom |
+
+Keeping this table because the errors are instructive: v1 was wrong about mechanism, v2 was wrong
+about placement. Both were confidently specified.
 
 ---
 
-## 1. Design constraints, restated
+## 1. The constraint that determines the design
 
-From [01](01_feasibility.md), the constraints that actually bind:
+From [01](01_feasibility.md) and [10](10_dynamic_substrate.md):
 
-1. **RAM budget: 9.66 GB.** Anything not in it must be on SSD.
-2. **Decode is bandwidth-bound**, not compute-bound. Active bytes/token is the throughput dial.
-3. **SSD is 3 GB/s sequential; random IOPS is unmeasured.** Do not put an unmeasured quantity on the
-   critical path.
-4. **Prefill dominates user-visible latency** (4.84 s @ 2048 tokens), so anything that batches
-   prefill IO is worth more than an equivalent decode gain.
+| | Capacity | Bandwidth |
+|---|---:|---:|
+| RAM (6.5 GB weights) | 52 Gbit | 84 GB/s |
+| SSD | ~1600 Gbit | 3 GB/s |
+| **Wikipedia + textbooks** | **14 Gbit** | — |
 
-Design rule that follows: **every SSD access must have an address that is knowable before the layer
-that needs it executes.**
+**Design rule: knowledge goes in RAM until 52 Gbit is exhausted. Only genuine overflow goes to SSD.**
+
+The v2 design violated this by putting 194 GB of knowledge behind a 3 GB/s interface when 14 Gbit of
+it would have fit in an 84 GB/s interface.
 
 ---
 
-## 2. The build target: Stage S2 (126B parameters)
-
-S2 is the primary build. S1 is a warm-up; S3/S4 are gated on measurement ([09 §6](09_method_comparison_and_decision.md)).
-
-| Component | Params | Footprint | Tier | Notes |
-|---|---:|---:|---|---|
-| Dense backbone (SSM + sparse attention) | 2.0 B | 0.40 GB | RAM | the reasoning anchor — **do not shrink** |
-| Fine-grained MoE pool | 24.0 B | 4.80 GB | RAM | **fully resident** ⇒ zero expert SSD traffic |
-| — of which active per token | 0.6 B | 0.12 GB | — | |
-| Tier-A memory: n-gram hash bank | ~70 B | 14.0 GB | SSD | prefetched, deterministic |
-| Tier-B memory: hierarchical blocks | ~30 B | 6.0 GB | SSD | one block per context |
-| **Total** | **~126 B** | **25.2 GB disk** | | fits the base 256 GB machine |
-
-RAM ledger, verified:
+## 2. The build target
 
 ```
-backbone + experts resident        5.20 GB
-KV cache (32k ctx, 4 attn layers)  0.54 GB
+┌────────────────────────────────────────────────────────────────┐
+│  FIXED SUBSTRATE — all resident, 6.5 GB, 84 GB/s               │
+│                                                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ Dense core          ~2–4 B params      0.4–0.8 GB        │  │
+│  │   BDH-style Hebbian synaptic state, or TTT-style          │  │
+│  │   learned state. Carries reasoning + working memory.      │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ Knowledge weights   ~26 B params (ternary)  5.2 GB        │  │
+│  │   ≤52 Gbit of durable world knowledge.                    │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ Fast-weight / synaptic state    ~0.2 GB                   │  │
+│  │   Written at inference. Hebbian or TTT update rule.       │  │
+│  │   THIS is where pattern interaction happens.              │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────┘
+                              │
+                              │  ONLY if measured knowledge need > 52 Gbit
+                              ▼
+┌────────────────────────────────────────────────────────────────┐
+│  OVERFLOW STORE — SSD, conditional, sized by measurement       │
+│  Engram n-gram hash, deterministic addressing, prefetched.     │
+│  Mechanism per [09]; tier demoted from primary to fallback.    │
+└────────────────────────────────────────────────────────────────┘
+```
+
+RAM ledger:
+
+```
+dense core + knowledge weights     5.60–6.00 GB
+fast-weight / synaptic state       0.20 GB
+KV cache (or none, if pure SSM)    0.00–0.54 GB
 activations / scratch              0.50 GB
------------------------------------------
-total                              6.24 GB   of 9.66 GB budget
-slack                              3.42 GB
+------------------------------------------------
+total                              6.30–7.24 GB   of 9.66 GB budget
 ```
 
-Throughput, verified:
-
-```
-[bandwidth] 0.520 GB/token / 84 GB/s  = 6.19 ms → 161.6 tok/s   ← binding
-[compute  ] 5.20 GFLOP/token          = 3.94 ms → 253.8 tok/s
-[memory IO] prefetched                → hidden under compute
-plan against 50% of serialized                  →  ~37 tok/s
-```
-
-**The whole expert pool is resident.** This is the single most important structural choice: it
-converts a fragile cache-hit-rate dependency (which is what makes Kimi K2 unusable at 0.47–4.7 tok/s)
-into a hard guarantee. Only the memory tiers touch SSD, and both are prefetchable.
+Fits, with 2.4–3.4 GB slack. **Disk required: ~5–20 GB, not 200 GB. The current 256 GB machine is
+sufficient — no hardware purchase.**
 
 ---
 
-## 3. Component specification
+## 3. Components
 
-### 3.1 Dense backbone — 2.0 B, RAM-resident
+### 3.1 Dense core — the dynamic substrate
 
-Mamba-2 / SSM layers with a small number of interleaved attention layers.
+Two candidate mechanisms; **Phase 1 measures both and picks one.** Do not pre-commit.
 
-- **SSM for O(1) state** — no KV-cache growth with sequence length, which is what makes 32k+ context
-  affordable in 0.54 GB.
-- **4 attention layers** for global retrieval, in a Gemma-style local:global ratio (5:1 sliding-window
-  to global). Gemma 4 uses 512-token windows on its E-series; adopt that as the starting point.
-- **Shared KV cache** across the top layers (Gemma 4 reports 37.5% global KV reduction by reusing
-  keys as values in global attention).
-- Ternary weights (BitNet-style), **trained natively ternary** — not post-training quantized
-  ([03 C1/C2](03_prior_art.md)).
+**Option A — BDH (Hebbian synaptic state).** Working memory lives entirely in synaptic plasticity
+with local Hebbian updates; attention-like behaviour *emerges* from pairwise correlation rather than
+being imposed. Gives monosemantic synapses and emergent modularity for free, which makes
+[06](06_evaluation.md)'s interpretability metrics measurable without a separate SAE.
+MIT-licensed, `bdh.py` + `train.py`, validated 10M–1B.
 
-**Do not shrink this to make room for memory.** Every surveyed result says the dense core is the
-reasoning anchor and that dense/sparse are complementary ([09 §7](09_method_comparison_and_decision.md)).
+**Option B — TTT (state as a learned model).** The hidden state *is* a model; the update rule is a
+self-supervised gradient step. Strongest published evidence that a fixed state can keep absorbing
+information: perplexity keeps falling past 16k where Mamba plateaus. PyTorch and JAX releases.
 
-### 3.2 Fine-grained MoE pool — 24 B, RAM-resident
+**Selection criterion:** bits-of-knowledge per parameter (§5), then tok/s at matched quality. Not
+aesthetics.
 
-- Fine granularity per Krajewski/Ludziejewski et al. — matching expert size to the FFN layer is
-  **not optimal at almost any compute budget**.
-- ~0.6 B active per token.
-- **Entire pool resident at 4.80 GB**, so routing never causes an SSD read.
+### 3.2 Knowledge weights
 
-### 3.3 Tier-A memory: n-gram hash bank — ~70 B, SSD, prefetched
+Ordinary trained parameters holding durable world knowledge, ternary where G-CAP permits. Capped at
+52 Gbit by physics.
 
-The primary knowledge store. Engram-style.
+**Open issue — G-CAP:** Allen-Zhu's 2 bits/param is verified only down to int8. At ternary the
+storage bound (1.6 bits/param) binds *before* the capacity law, so **beating 2.0 bits/param requires
+int8 or higher, not just a better architecture.** Any capacity claim at ternary must be measured, not
+assumed. This must be controlled in the Phase-1 experiment or the result is uninterpretable.
 
-- **Addressing:** multi-head hash of suffix n-grams (N=2, N=3) over token IDs. **No learned keys,
-  no index, no re-indexing.**
-- **Injection:** residual branch into early-to-mid blocks — DeepSeek uses layers 2 and 15 of 36;
-  scale proportionally. Injected *before* the attention block, not at the input.
-- **Access points:** ~3 (Meta's measured sweet spot over a shared pool).
-- **IO:** ~24 reads/token, **0.08 ms**, fully hidden under the 6.19 ms compute step.
-- **Prefill:** all n-gram keys for the entire prompt are known before compute starts ⇒ issue every
-  read as one batched, sorted, near-sequential pass.
+### 3.3 Fast-weight / synaptic state — where the premise lives
 
-Why this and not product keys: it is the only addressing scheme whose throughput is **flat at
-161.6 tok/s across a 25× swing in SSD IOPS** ([09 §3](09_method_comparison_and_decision.md)).
+The component the original proposal is actually about, and the one v1/v2 omitted.
 
-### 3.4 Tier-B memory: hierarchical block memory — ~30 B, SSD, block-fetched
+- Updated **at inference**, no gradient step on the base weights.
+- Hebbian (BDH) or self-supervised (TTT) or surprise-gated (Titans).
+- **Pattern interaction — original Component 5 — happens here or nowhere.** Two active patterns
+  co-occurring modify shared synapses; the modification *is* the new pattern.
+- Forgetting: Titans' gradient-of-loss surprise signal with momentum and gating. Not a hand-tuned
+  decay constant ([02](02_math_corrections.md)).
 
-Semantic/long-tail knowledge, Apple-style.
+### 3.4 Overflow store — conditional
 
-- **Addressing:** hierarchical k-means over context. Apple's levels: (128 tok, 16 clusters),
-  (32 tok, 32 clusters), (8 tok, 128 clusters).
-- **Fetch:** one **contiguous block** per context — 225 M params ≈ 45 MB, one sequential read,
-  15.0 ms per context switch = **0.015 ms/token** amortised over a 1000-token generation.
-- Complements Tier A: hash lookup captures local lexical structure, block fetch captures topical
-  knowledge. They fail in opposite directions, which is why both are present.
+Everything in [09](09_method_comparison_and_decision.md) stands: deterministic n-gram hash
+addressing, prefetched, ~24 reads/token, flat throughput from 500K down to 20K IOPS.
 
-### 3.5 Memory lifecycle
-
-Adopt Titans' **gradient-based surprise metric** (loss gradient as novelty signal, with momentum and
-a gated forgetting mechanism) rather than the hand-specified `U = Confidence × Usage × Recency`
-decay, which has no fitted constant and no measurement procedure ([02](02_math_corrections.md)).
-
-### 3.6 Reasoning
-
-Test-time compute over the throughput headroom. At ~37 tok/s, 10⁴ thinking tokens = **271 s per
-answer**; at the 161 tok/s ceiling, 62 s. Energy is irrelevant (~1 Wh per 2-minute answer); wall-clock
-is the only cost.
+**It is only built if Phase 2 measures a knowledge requirement above 52 Gbit.** Building it before
+that measurement is what v2 did wrong.
 
 ---
 
-## 4. Data flow
+## 4. What is unproven
 
-```
-tokens
-  │
-  ├─► n-gram hash (N=2,3, multi-head)  ──► PREFETCH Tier-A rows from SSD ─┐
-  │   (addresses known here, before any compute)                          │
-  │                                                                       │
-  ├─► context k-means cluster ──► PREFETCH Tier-B block (once per context)┤
-  │                                                                       │
-  ▼                                                                       │
-dense backbone (SSM + sparse attention, ternary, RAM)                     │
-  │                                                                       │
-  ├── block 2  ◄── Tier-A residual injection ◄──────────────────────────--┤
-  ├── block k  ◄── Tier-B block add ◄────────────────────────────────────-┤
-  ├── block 15 ◄── Tier-A residual injection ◄───────────────────────────-┘
-  │
-  ├─► fine-grained MoE routing (all experts resident in RAM)
-  │
-  ▼
-output  ──► [optional] test-time search / reasoning loop
-```
-
-The two prefetch arrows are the architecture. Everything else is conventional.
+1. **No published system stores durable world knowledge in dynamic state.** BDH/TTT state is
+   *working* memory. This spec assumes the dense weights carry world knowledge and the dynamic state
+   carries reasoning and working memory — which is the published, conservative reading.
+2. **Pattern interaction (Component 5) has no implementation anywhere.** §3.3 says where it would
+   live, not that it works.
+3. **BDH's public repo is the paper baseline**; the 97.4% Sudoku figure is from an unreleased
+   internal implementation and must not be planned against.
+4. **Hebbian training stability above 1B is unvalidated.**
+5. **Ternary + capacity law interaction (G-CAP)** could invalidate any bits/param comparison.
 
 ---
 
-## 5. Scaling path
+## 5. The decisive measurement
 
-| Stage | Memory | Total | Disk | Machine | Gate to proceed |
-|---|---:|---:|---:|---|---|
-| S1 | 30 B | 56 B | 11.2 GB | current | pipeline works end-to-end |
-| **S2** | **100 B** | **126 B** | **25.2 GB** | **current** | **marginal-value curve still rising** |
-| S3 | 300 B | 326 B | 65.2 GB | current | curve still rising at S2→S3 |
-| S4 | 974 B | 1000 B | 200.0 GB | **512 GB / ext. NVMe** | curve has not turned by S3 |
+**Knowledge bits per parameter, dynamic substrate vs dense baseline (2.0 b/param, Allen-Zhu).**
 
-S1–S3 all run on the machine already owned. **Only S4 requires a purchase, and S4 is gated on a
-measurement not yet taken.**
+| Result | Action |
+|---:|---|
+| < 1.0 | Kill dynamics-for-knowledge; revert to v2 memory-bank design |
+| 1.0–2.0 | Dynamics for reasoning only; build overflow store |
+| = 2.0 | Parity; decide on throughput and interpretability |
+| > 2.0 | **Premise proven.** Publishable; scale the substrate |
 
----
-
-## 6. What is unproven in this design
-
-Stated plainly, because these are the things that make it research rather than engineering:
-
-1. **The two-tier memory combination is novel.** Engram (hash) and Apple (blocks) have each been
-   validated alone; nobody has published them together. They may be redundant rather than
-   complementary.
-2. **974B is 7.6× beyond the largest published memory bank.** S4 is an extrapolation, which is why
-   it is gated.
-3. **Native-ternary training at this scale on one machine is unvalidated.** BitNet's results are at
-   2B dense.
-4. **The dense/sparse balance is guessed.** 2B dense : 24B experts : 100B memory is not derived from
-   a fitted scaling law — it is a starting point to be tuned against the U-curve.
-5. **Pattern Synthesis (original Component 7) has no implementation.** No surveyed work does this at
-   scale. It is deferred, not solved.
+Cost: ~2 weeks at 10M–100M params on the current machine. This replaces the 3–6 month memory-bank
+programme as the first thing built.

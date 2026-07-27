@@ -1,10 +1,25 @@
 # 09 — Method Comparison and Decision
 
+> ## ⚠️ PARTIALLY SUPERSEDED by [10_dynamic_substrate.md](10_dynamic_substrate.md)
+>
+> This document compares **external memory mechanisms** and picks the best one. That comparison is
+> still correct and still governs the overflow tier: **deterministic n-gram hash addressing +
+> contiguous block fetch**, chosen for robustness to unmeasured SSD IOPS.
+>
+> What is superseded is the **tier decision**. This document assumed an external memory bank is the
+> primary architecture. [10](10_dynamic_substrate.md) shows that is wrong on capacity and bandwidth
+> grounds: a fixed substrate in RAM holds Wikipedia + textbooks with 3.7× headroom at 28× the
+> bandwidth. The external store is now a **conditional overflow tier**, built only if a measured
+> knowledge requirement exceeds 52 Gbit.
+>
+> **Read §1–§5 as authoritative** (mechanism choice). **Read §6 as revised** — the staged
+> 126B → 326B → 1T plan now applies only to the overflow tier, and only after Phase 2 justifies
+> building one at all.
+>
 > Numbers from `verify_decision.py`; output committed at `verify_decision_output.txt`.
 > ```
 > $ python3 verify_decision.py   → exit 0
 > ```
-> Decisions here **supersede** the architecture in [04](04_architecture.md) where they conflict.
 
 ---
 

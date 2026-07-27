@@ -43,11 +43,32 @@ Anchors for intuition:
 - Numenta's canonical SDR, C(2048, 40) ≈ 10⁸⁴·⁴
 - Atoms in the observable universe ≈ 10⁸⁰
 
-**Why the correction does not help as much as it looks.** Both 10¹⁸⁹ and 10²⁴¹·⁸ are so far beyond
-any reachable quantity that the distinction is rhetorical. The capacity argument proves that *address
-space* is not the bottleneck — which was never in dispute. It says nothing about how many patterns can
-be **formed, distinguished, retrieved, and kept non-interfering**, which is the actual engineering
-problem. A hash function has 2²⁵⁶ outputs and zero intelligence.
+### The deeper error: the unit, not the arithmetic
+
+Fixing 10¹⁸⁹ → 10²⁴¹·⁸ corrects the arithmetic and misses the real problem. **C(10000,100) is a
+count of patterns — an address space. Its logarithm is the storage capacity.**
+
+```
+C(10000,100)        = 10^241.8   ← COUNT of distinguishable patterns
+log2(C(10000,100))  = 803 bits   ← what one pattern can actually CARRY
+```
+
+The hard ceiling for any n-unit substrate is **n bits**, regardless of encoding:
+
+| Units n | Active w | log₂ C(n,w) | Raw ceiling |
+|---:|---:|---:|---:|
+| 10,000 | 100 | 803 bits | 10,000 bits |
+| 100,000 | 1,000 | 8,073 bits | 100,000 bits |
+| 1,000,000 | 10,000 | 80,785 bits | 1,000,000 bits |
+
+**Why the correction does not sink the premise.** Restated in bits, the argument still works — it
+just needs the right number. A 6.5 GB substrate holds 52 Gbit, and Allen-Zhu & Li measured that
+English Wikipedia + textbooks is ~14 Gbit. **The fixed brain has 3.7× headroom for Wikipedia-scale
+knowledge.** See [10_dynamic_substrate.md](10_dynamic_substrate.md) — this number reversed the
+architecture decision.
+
+The capacity argument proves *address space* is not the bottleneck, which was never in dispute. The
+binding quantity is **bits**, and stated in bits the premise survives.
 
 **Recommendation:** keep the corrected number, but demote the argument from "capacity argument" to a
 footnote establishing that representational addressing is not the limiting factor. Replace the load
