@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Generated datasets and checkpoints are never committed.
+# The generator + seed is the artifact; see implementation/04_golden_dataset.md.
+src/data/out/
+data/
+out/
+runs/
+checkpoints/
+*.ckpt
+*.pt
+*.jsonl
