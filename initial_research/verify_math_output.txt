@@ -1,0 +1,320 @@
+
+==========================================================================
+1. SDR CAPACITY  — checking README claim C(10000,100) ~ 10^189
+==========================================================================
+C(10000,100) exact digits      : 242
+C(10000,100) log10             : 241.8143
+README claim                   : 10^189
+VERDICT                        : README is WRONG by 52.8 orders of magnitude
+Correct value                  : ~10^241.8
+cross-check via lgamma (log10) : 241.8143  -> agrees: True
+
+What 10^189 actually corresponds to:
+  C(10000, 60) = 10^ 158.00
+  C(10000, 64) = 10^ 166.81
+  C(10000, 70) = 10^ 179.82
+  C(10000, 80) = 10^ 201.01
+  C(10000,100) = 10^ 241.81
+
+Comparison anchors:
+  Numenta canonical SDR C(2048,40) = 10^84.38
+  atoms in observable universe     ~ 10^80
+
+==========================================================================
+2. SEQUENCE-LENGTH CLAIM — 'reduce seq 4x => 16x less attention compute'
+==========================================================================
+
+ d= 2048 n=  2048
+   attention share of total FLOPs :  14.3%
+   attention-only reduction at 4x :  16.00x   (README says 16x)
+   TOTAL model reduction at 4x    :   4.48x   <-- the number that matters
+
+ d= 4096 n=  4096
+   attention share of total FLOPs :  14.3%
+   attention-only reduction at 4x :  16.00x   (README says 16x)
+   TOTAL model reduction at 4x    :   4.48x   <-- the number that matters
+
+ d= 4096 n= 16384
+   attention share of total FLOPs :  40.0%
+   attention-only reduction at 4x :  16.00x   (README says 16x)
+   TOTAL model reduction at 4x    :   5.71x   <-- the number that matters
+
+ d= 8192 n=131072
+   attention share of total FLOPs :  72.7%
+   attention-only reduction at 4x :  16.00x   (README says 16x)
+   TOTAL model reduction at 4x    :   8.80x   <-- the number that matters
+
+VERDICT: '16x' is true only for the attention sub-term, which is a minority
+         of FLOPs at realistic d,n. Real end-to-end saving ~4-5x, and that
+         ignores the byte-level encoder/decoder a patcher must add back.
+
+==========================================================================
+3. MoE CLAIM — '64 experts x 4M, top-2 => 32x savings'
+==========================================================================
+total expert params  : 256M
+active expert params : 8M
+ratio                : 32x  -> README arithmetic is CORRECT
+
+BUT the README presents this as system savings. It is not:
+  - MEMORY is unchanged: all 256M must be resident or streamable.
+  - attention/router/embeddings/norms are NOT reduced.
+  - Amdahl: if experts are 60% of FLOPs, 32x on that part gives
+      expert share 50% -> end-to-end 1.94x
+      expert share 60% -> end-to-end 2.39x
+      expert share 70% -> end-to-end 3.11x
+      expert share 80% -> end-to-end 4.44x
+
+==========================================================================
+4. TARGET HARDWARE — M4 Mac mini, 16 GB unified memory
+==========================================================================
+unified memory       : 16 GiB = 17.18 GB decimal
+peak memory bandwidth: 120 GB/s
+effective (decode)   : 84-102 GB/s
+internal SSD seq read: 3.0 GB/s
+
+Usable RAM budget:
+  -macOS + WindowServer floor        3.50 GiB
+  -python/runtime/app overhead       1.00 GiB
+  -headroom to avoid swap death      1.50 GiB
+  = engine budget                  10.00 GiB
+  (macOS default GPU wired cap ~66-75% of RAM = 10.6-12.0 GiB)
+
+DESIGN POINT: engine budget = 9.0 GiB = 9.66 GB
+
+==========================================================================
+5. CAN 1e12 PARAMETERS EVEN BE STORED?
+==========================================================================
+format               bytes/param          size   fits 256GB SSD?
+FP16                      2.0000     2000.0 GB                NO
+INT8                      1.0000     1000.0 GB                NO
+INT4                      0.5000      500.0 GB                NO
+2-bit packed              0.2500      250.0 GB                NO
+ternary 5-per-8bit        0.2000      200.0 GB                NO
+1-bit                     0.1250      125.0 GB               yes
+
+NOTE: ternary is 5 values per byte (3^5=243<=256) -> 1.6 bits/param, not 1.58.
+      1e12 ternary params = 200.0 GB.
+      Base Mac mini ships 256 GB SSD. After macOS (~20 GB) you have ~215 GB.
+      => 1T ternary params fits ONLY on the 256GB model with almost nothing
+         else on disk. 512 GB internal or external NVMe is the sane config.
+
+==========================================================================
+6. DECODE ROOFLINE — what throughput is physically available?
+==========================================================================
+Resident-in-RAM case (no SSD traffic), ternary 0.2 B/param:
+   active params   bytes/token   tok/s @84GB/s  tok/s @102GB/s
+          0.5B       0.10 GB           840.0          1020.0
+          1.0B       0.20 GB           420.0           510.0
+          2.0B       0.40 GB           210.0           255.0
+          5.0B       1.00 GB            84.0           102.0
+         10.0B       2.00 GB            42.0            51.0
+         32.0B       6.40 GB            13.1            15.9
+
+Kimi K2 reference point (1T total / 32B active), if it were ternary:
+  32B active x 0.2 B = 6.40 GB of weights per token
+  That 6.40 GB would fit the 9.66 GB budget IF it were the same
+  6.40 GB every token. It is not: the active set is re-selected per token
+  from a 200 GB pool, of which only ~6.5 GB (3.2%) is resident.
+  Coarse-grained routing (8 of 384 experts) gives poor reuse, so most of
+  the 6.40 GB is fetched from SSD each token:
+    fully-missing case : 2.13 s/token = 0.47 tok/s
+    50% hit rate     : 1.07 s/token = 0.94 tok/s
+    80% hit rate     : 0.43 s/token = 2.34 tok/s
+    90% hit rate     : 0.21 s/token = 4.69 tok/s
+  => even at a 90% hit rate K2 gives ~4.7 tok/s. Porting K2 is NOT the answer;
+     the activation set must be made far smaller AND far more reusable.
+
+==========================================================================
+7. THE BINDING CONSTRAINT: SSD miss traffic per token
+==========================================================================
+Time per token = max(RAM traffic / BW_ram, SSD miss traffic / BW_ssd)
+(assuming perfect prefetch overlap; serialized is the sum)
+
+SSD budget for a target rate (at 3 GB/s):
+    5 tok/s ->   600.0 MB/token may miss cache =   3000.0M ternary params
+   10 tok/s ->   300.0 MB/token may miss cache =   1500.0M ternary params
+   20 tok/s ->   150.0 MB/token may miss cache =    750.0M ternary params
+   30 tok/s ->   100.0 MB/token may miss cache =    500.0M ternary params
+   60 tok/s ->    50.0 MB/token may miss cache =    250.0M ternary params
+
+Required cache hit rate, hot set resident in RAM:
+  hot set 6.5 GB ternary = 32.5B params resident of 1000B total (3.25%)
+  active/token  target tok/s   required hit rate
+        1.0B            10         none needed
+        1.0B            20               25.0%
+        2.0B            10               25.0%
+        2.0B            20               62.5%
+        5.0B            10               70.0%
+        5.0B            20               85.0%
+       10.0B            10               85.0%
+       10.0B            20               92.5%
+
+==========================================================================
+8. PRODUCT-KEY MEMORY — why 1e12 params is tractable at all
+==========================================================================
+PEER/product-key: N slots addressed by two sqrt(N) sub-key sets.
+Index cost is O(sqrt(N)*d), NOT O(N*d). This is the whole unlock.
+
+  N=     1e+06 slots: sqrt(N)=     1000  key params=    2.0M (   4.1 MB fp16)  value params=    2.0B
+  N=     1e+08 slots: sqrt(N)=    10000  key params=   20.5M (  41.0 MB fp16)  value params=  204.8B
+  N=     5e+08 slots: sqrt(N)=    21817  key params=   44.7M (  89.4 MB fp16)  value params=  974.8B
+  N=     1e+09 slots: sqrt(N)=    31623  key params=   64.8M ( 129.5 MB fp16)  value params= 2048.0B
+
+Target: 476M slots x d=2048 = 974B value params
+  value store on disk @ ternary: 194.8 GB
+  key index in RAM @ fp16      : 89.3 MB  <-- fits trivially
+
+Per token, top-k=128 over 8 memory layers:
+  value bytes fetched : 419.4 KB   (bandwidth: negligible)
+  random reads        : 1024
+    @ 100K IOPS -> 10.24 ms/token (98 tok/s ceiling)
+    @ 300K IOPS -> 3.41 ms/token (293 tok/s ceiling)
+    @ 500K IOPS -> 2.05 ms/token (488 tok/s ceiling)
+  => memory layers are IOPS-bound, not bandwidth-bound. 4KB-align slots.
+
+==========================================================================
+9. PROPOSED BUDGET — does a 1e12-param system close?
+==========================================================================
+component                            params    footprint       tier
+dense backbone (SSM/attn)           2.000B     0.400 GB        RAM
+fine-grained MoE pool              24.000B     4.800 GB        RAM
+  ..active per token                0.600B     0.120 GB   (subset)
+product-key memory values         973.955B   194.791 GB        SSD
+  ..fetched per token               0.002B     0.000 GB   (subset)
+product-key index (fp16)            0.045B     0.089 GB        RAM
+
+TOTAL PARAMETERS : 1.000000e12  -> MEETS the 1T target
+memory slots      : 0.476B  (sqrt(N) = 21,807)
+TOTAL DISK        : 194.8 GB values + 5.2 GB weights = 200.0 GB
+
+RAM ledger (budget 9.66 GB):
+  backbone + experts resident :  5.200 GB
+  product-key index           :  0.089 GB
+  KV cache (32k ctx)          :  0.537 GB
+  activations / scratch       :  0.500 GB
+  ---------------------------------------
+  total                       :  6.326 GB
+  slack                       :  3.337 GB  -> FITS
+  NOTE: the whole expert pool is resident, so after warmup expert SSD traffic
+        is ZERO. This is the design choice that makes the box viable.
+
+Per-token cost, three independent limits:
+  [bandwidth] 0.520 GB/token / 84 GB/s =   6.19 ms ->  161.5 tok/s
+  [compute  ] 5.20 GFLOP/token / 1.32 TFLOP/s =   3.94 ms ->  253.8 tok/s
+  [memory IO] 1024 random reads / 100K IOPS =  10.24 ms ->   97.7 tok/s
+  [memory IO] 1024 random reads / 300K IOPS =   3.41 ms ->  293.0 tok/s
+
+  BINDING LIMIT (max of the three): 161.5 tok/s theoretical
+  serialized (no overlap)         : 73.8 tok/s
+  at 50% of serialized (realistic): 36.9 tok/s  <-- PLAN AGAINST THIS
+
+Prefill (compute-bound, assume 50% MFU on GEMM):
+    512-token prompt ->   1.21 s (423 tok/s prefill)
+   2048-token prompt ->   4.84 s (423 tok/s prefill)
+   8192-token prompt ->  19.36 s (423 tok/s prefill)
+  => prefill, not decode, is the latency users will feel. Budget for it.
+
+==========================================================================
+10. TRAINING — the number that decides the whole program
+==========================================================================
+
+--- 30% MFU (realistic Metal): 1.32 TFLOP/s effective ---
+  1T dense, Chinchilla 20 tok/param      C=1.20e+26 FLOP -> 2.88e+06 yr
+  1T MoE, 5B active, 20T tokens          C=6.00e+23 FLOP -> 1.44e+04 yr
+  1T MoE, 5B active, 1T tokens           C=3.00e+22 FLOP -> 7.20e+02 yr
+  30B active, 1T tokens                  C=1.80e+23 FLOP -> 4.32e+03 yr
+  2B backbone, 100B tokens               C=1.20e+21 FLOP -> 2.88e+01 yr
+  500M backbone, 10B tokens              C=3.00e+19 FLOP -> 263.05 days
+  100M backbone, 2B tokens               C=1.20e+18 FLOP -> 10.52 days
+
+--- 50% MFU (optimistic): 2.20 TFLOP/s effective ---
+  1T dense, Chinchilla 20 tok/param      C=1.20e+26 FLOP -> 1.73e+06 yr
+  1T MoE, 5B active, 20T tokens          C=6.00e+23 FLOP -> 8.64e+03 yr
+  1T MoE, 5B active, 1T tokens           C=3.00e+22 FLOP -> 4.32e+02 yr
+  30B active, 1T tokens                  C=1.80e+23 FLOP -> 2.59e+03 yr
+  2B backbone, 100B tokens               C=1.20e+21 FLOP -> 1.73e+01 yr
+  500M backbone, 10B tokens              C=3.00e+19 FLOP -> 157.83 days
+  100M backbone, 2B tokens               C=1.20e+18 FLOP -> 6.31 days
+
+  7 days at 30% MFU = 7.983e+17 FLOP  => N*D = 1.331e+17
+     N=    50M params -> D=    2.66B tokens  (  53.2 tok/param)
+     N=   100M params -> D=    1.33B tokens  (  13.3 tok/param)
+     N=   300M params -> D=    0.44B tokens  (   1.5 tok/param)
+     N=  1000M params -> D=    0.13B tokens  (   0.1 tok/param)
+
+ 30 days at 30% MFU = 3.421e+18 FLOP  => N*D = 5.702e+17
+     N=    50M params -> D=   11.40B tokens  ( 228.1 tok/param)
+     N=   100M params -> D=    5.70B tokens  (  57.0 tok/param)
+     N=   300M params -> D=    1.90B tokens  (   6.3 tok/param)
+     N=  1000M params -> D=    0.57B tokens  (   0.6 tok/param)
+
+ 90 days at 30% MFU = 1.026e+19 FLOP  => N*D = 1.711e+18
+     N=    50M params -> D=   34.21B tokens  ( 684.3 tok/param)
+     N=   100M params -> D=   17.11B tokens  ( 171.1 tok/param)
+     N=   300M params -> D=    5.70B tokens  (  19.0 tok/param)
+     N=  1000M params -> D=    1.71B tokens  (   1.7 tok/param)
+
+==========================================================================
+11. WRITING vs TRAINING MEMORY — the actual path to 1e12
+==========================================================================
+Regime (a) GRADIENT-TRAIN the memory values (Memory Layers at Scale style).
+    1 tok/param -> C=5.69e+24 FLOP -> 1.37e+05 years
+   20 tok/param -> C=1.14e+26 FLOP -> 2.73e+06 years
+   VERDICT: DEAD. Off by 5-6 orders of magnitude. Not a scheduling problem.
+
+Regime (b) WRITE the memory values by encoding a corpus once (RETRO/kNN-LM style).
+   Cost = 2 * N_encoder * corpus_tokens (forward pass only, one epoch).
+   Need 476M slots. corpus_tokens = slots * chunk_len.
+
+     encoder  chunk   corpus tok       FLOP    wall clock
+        10M     64     3.04e+10   6.09e+17        5.3 d  <-- viable
+        10M    128     6.09e+10   1.22e+18       10.7 d  <-- viable
+        10M    256     1.22e+11   2.44e+18       21.4 d  <-- viable
+        30M     64     3.04e+10   1.83e+18       16.0 d  <-- viable
+        30M    128     6.09e+10   3.65e+18       32.0 d  <-- viable
+        30M    256     1.22e+11   7.31e+18       64.1 d
+       100M     64     3.04e+10   6.09e+18       53.4 d
+       100M    128     6.09e+10   1.22e+19      106.8 d
+       100M    256     1.22e+11   2.44e+19      213.5 d
+       500M     64     3.04e+10   3.04e+19      266.9 d
+       500M    128     6.09e+10   6.09e+19      533.8 d
+       500M    256     1.22e+11   1.22e+20     1067.6 d
+
+   CORRECTION TO MY OWN EARLIER LINE: at a 500M encoder and 256-token chunks
+   this is 4489 days (12.3 years), NOT 'weeks'. The job is only feasible with
+   a SMALL encoder and SHORT chunks. Concretely:
+     encoder 10M params, 64-token chunks -> 30.4B corpus tokens -> 5.3 days one-time
+   The Neural Engine (38 TOPS INT8) could cut this ~3-10x further if the
+   encoder can be compiled to it, but treat that as UNVERIFIED upside.
+
+Regime (c) what the corpus requirement implies:
+   chunk= 64 -> need   30.4B tokens of text  (the Pile ~300B, FineWeb ~15T -> available)
+   chunk=128 -> need   60.9B tokens of text  (the Pile ~300B, FineWeb ~15T -> available)
+   chunk=256 -> need  121.8B tokens of text  (the Pile ~300B, FineWeb ~15T -> available)
+
+=> CONCLUSION: 1e12 parameters is reachable on this box ONLY because ~97% of
+   them are WRITTEN (one forward pass each) rather than TRAINED (many backward
+   passes each). That is a ~2-week batch job vs a ~10^5-year one.
+
+==========================================================================
+12. TEST-TIME COMPUTE — trading throughput for reasoning
+==========================================================================
+    10 tok/s, 1e+03 thinking tokens ->    100.0 s/answer
+    10 tok/s, 1e+04 thinking tokens ->   1000.0 s/answer
+    10 tok/s, 1e+05 thinking tokens ->  10000.0 s/answer
+
+    30 tok/s, 1e+03 thinking tokens ->     33.3 s/answer
+    30 tok/s, 1e+04 thinking tokens ->    333.3 s/answer
+    30 tok/s, 1e+05 thinking tokens ->   3333.3 s/answer
+
+    60 tok/s, 1e+03 thinking tokens ->     16.7 s/answer
+    60 tok/s, 1e+04 thinking tokens ->    166.7 s/answer
+    60 tok/s, 1e+05 thinking tokens ->   1666.7 s/answer
+
+   120 tok/s, 1e+03 thinking tokens ->      8.3 s/answer
+   120 tok/s, 1e+04 thinking tokens ->     83.3 s/answer
+   120 tok/s, 1e+05 thinking tokens ->    833.3 s/answer
+
+Reference: ARC-AGI-2 Kaggle compute-capped track allows ~$0.20/task.
+A Mac mini at ~30W for 120 s = 1.0 Wh ~ $0.0002 of electricity.
+Energy is NOT the constraint. Wall-clock and reasoning quality are.

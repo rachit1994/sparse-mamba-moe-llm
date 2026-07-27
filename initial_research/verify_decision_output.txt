@@ -1,0 +1,112 @@
+
+==========================================================================
+1. IO COST PER TOKEN — learned top-k gather vs hash lookup vs block fetch
+==========================================================================
+A) Learned product keys, top-k gather (my original 04 spec):
+   top-k=128 x 8 layers        = 1024 random reads/token
+   at 300K IOPS                    = 3.41 ms/token -> 293 tok/s ceiling
+   PREFETCHABLE? NO - the query is the residual stream, unknown until the layer runs.
+
+B) Meta-corrected: shared pool, 3 memory layers:
+   top-k=128 x 3 layers          = 384 random reads/token
+   at 300K IOPS                    = 1.28 ms/token -> 781 tok/s ceiling
+   PREFETCHABLE? NO - same reason.
+
+C) Engram-style n-gram hash (heads x n-gram orders x injection points):
+   4 heads x 2 orders x 3 inject pts = 24 reads/token
+   at 300K IOPS                    = 0.080 ms/token -> 12,500 tok/s ceiling
+   PREFETCHABLE? YES - hash of token IDs, known before any layer runs.
+   reduction vs (A): 43x fewer reads
+
+D) Apple-style block fetch (per CONTEXT, not per token):
+   block = 225M params = 45.0 MB -> ONE sequential read of 45.0 MB
+   at 3 GB/s = 15.0 ms per context switch
+   amortized over a 1000-token generation: 0.0150 ms/token
+
+==========================================================================
+2. THE PREFETCH ARGUMENT — why deterministic addressing wins on this box
+==========================================================================
+Decode is sequential: token t+1's n-gram key depends only on tokens <= t.
+So the memory read for step t+1 can be issued DURING step t's compute.
+
+   compute per token          :   6.19 ms
+   (C) hash IO per token      :   0.08 ms
+   (B) top-k IO per token     :   1.28 ms
+
+   NOT prefetchable (serialize):  133.9 tok/s  [learned keys]
+   PREFETCHED (fully hidden)   :  161.6 tok/s  [hash keys]
+   speedup from prefetchability: 1.21x
+
+   During PREFILL the entire sequence's keys are known at once ->
+   all memory reads can be issued as one batched, sorted, near-sequential pass.
+
+   SENSITIVITY TO IOPS (the one hardware number we have NOT measured):
+         IOPS   learned-key tok/s   hash tok/s   hash advantage
+        500K               143.7        161.6            1.12x
+        300K               133.9        161.6            1.21x
+        100K                99.7        161.6            1.62x
+         50K                72.1        161.6            2.24x
+         20K                39.4        161.6            4.10x
+   => the hash design DEGRADES GRACEFULLY as IOPS falls; the learned-key
+      design does not. Choosing hash de-risks the untested assumption.
+
+==========================================================================
+3. HOW BIG SHOULD THE MEMORY ACTUALLY BE? (published ratios, scaled)
+==========================================================================
+Backbone assumed: 2.0B params
+
+source                              their ratio   scaled memory  disk @ternary
+Google Gemma 4 E4B (shipped)               1.8x           3.6B          0.7 GB
+Google Gemma 4 26B-A4B (shipped)           6.8x          13.7B          2.7 GB
+Meta Memory Layers (max pub.)             16.0x          32.0B          6.4 GB
+Apple hierarchical (edge-focused)         28.7x          57.5B         11.5 GB
+ByteDance UltraMemV2 (max pub.)           48.0x          96.0B         19.2 GB
+
+THIS PROPOSAL (04_architecture)           37.5x         974.0B        194.8 GB
+
+Most aggressive PUBLISHED ratio : 48.0x  (UltraMemV2)
+This proposal's ratio           : 37.5x
+Extrapolation beyond published  : 0.8x
+Largest memory bank ever published: 128B (Meta)
+This proposal                     : 974B  -> 7.6x beyond
+
+==========================================================================
+4. STAGED TARGET — where to actually build, and what it costs
+==========================================================================
+stage       memory params     total       disk   vs published
+S1                   30B       56B     11.2 GB          0.2x
+S2                  100B      126B     25.2 GB          0.8x
+S3                  300B      326B     65.2 GB          2.3x
+S4                  974B     1000B    200.0 GB          7.6x
+
+Storage feasibility per stage (256 GB Mac mini has ~215 GB free):
+  S1:   11.2 GB -> fits 256GB model
+  S2:   25.2 GB -> fits 256GB model
+  S3:   65.2 GB -> fits 256GB model
+  S4:  200.0 GB -> needs 512GB / external NVMe
+
+==========================================================================
+5. UltraMemV2's CONTROLLED RESULT — the one that should change the target
+==========================================================================
+Reported comparison at EQUAL activated compute (2.5B):
+    UltraMemV2-2.5B / 60B total  / top-768   >   UltraMemV2-2.5B / 120B total / top-256
+
+  i.e. 3x MORE activation density beat 2x MORE total sparse parameters.
+  Interpretation: at fixed compute, the marginal value of TOTAL sparse params
+  is lower than the marginal value of ACTIVATION DENSITY (top-m).
+
+  Consequence for this project: 'one trillion parameters' optimises the axis
+  with the WORST measured return. Budget should shift toward higher top-m
+  and a larger dense/active core, with total memory sized to the measured
+  point where the U-curve turns -- not fixed at 1e12 by fiat.
+
+==========================================================================
+6. REVISED BUDGET at stage S2 (100B memory) on the 16 GB box
+==========================================================================
+  backbone 2B + experts 24B resident = 5.20 GB
+  memory 100B on SSD              = 20.0 GB
+  TOTAL system                       = 126B params, 25.2 GB disk
+  RAM: 5.20 weights + 0.54 KV + 0.50 act = 6.24 GB of 9.66 GB budget
+  decode bandwidth limit             = 162 tok/s
+  hash-memory IO (prefetched)        = hidden under compute
+  => S2 fits the 256 GB base Mac mini with room to spare.
