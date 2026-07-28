@@ -7,11 +7,12 @@ venv/
 
 # Generated datasets and checkpoints are never committed.
 # The generator + seed is the artifact; see implementation/04_golden_dataset.md.
+# Paths are root-anchored: a bare "data/" would also ignore src/data/ source code.
+/data/
+/out/
+/runs/
+/checkpoints/
 src/data/out/
-data/
-out/
-runs/
-checkpoints/
 *.ckpt
 *.pt
 *.jsonl
