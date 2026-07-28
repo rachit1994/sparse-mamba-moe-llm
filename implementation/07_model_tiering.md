@@ -60,3 +60,21 @@ two Opus ones, because the two are less likely to share a misunderstanding.
 Every brief in [`06_agent_briefs/`](06_agent_briefs/) names its tier. When spawning, pass the
 matching `model` parameter. If a brief is unclear about tier, it defaults to **Sonnet** — never
 Opus.
+
+## Dispatch hygiene (learned the expensive way)
+
+**Check current state before dispatching, and do not touch a dispatched agent's files.**
+
+A Haiku agent was once sent to make a set of doc edits, and while it worked the lead made the same
+edits directly in response to a stop-hook prompt. The agent completed ~20 minutes later against an
+already-clean tree and reported "nothing to commit" — a correct report of a no-op that cost ~53k
+tokens.
+
+Rules that follow:
+
+- Before spawning, run `git status` and confirm the work is not already done.
+- Once an agent owns a path, the lead does not edit that path. If a hook or interrupt demands a
+  commit, commit *what exists* and let the agent finish — do not race it.
+- Prefer one agent per path, never overlapping ownership.
+- For edits smaller than roughly a dozen lines, the lead doing it directly is cheaper than writing a
+  brief, dispatching, and adjudicating. Delegation has fixed overhead; very small tasks are below it.
