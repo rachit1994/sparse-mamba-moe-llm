@@ -5,6 +5,7 @@
 **Read first:** [`../00_START_HERE.md`](../00_START_HERE.md) ·
 [`../02_testing_philosophy.md`](../02_testing_philosophy.md) §4, §6 ·
 [`../03_edge_cases_and_scares.md`](../03_edge_cases_and_scares.md) S3, S5, H3, H4
+**Tier:** Build (Sonnet)
 
 ---
 

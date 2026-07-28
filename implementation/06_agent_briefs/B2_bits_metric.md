@@ -6,6 +6,7 @@
 [`../02_testing_philosophy.md`](../02_testing_philosophy.md) §2, §5 ·
 [`../04_golden_dataset.md`](../04_golden_dataset.md) §4 ·
 [`../03_edge_cases_and_scares.md`](../03_edge_cases_and_scares.md) S1, S3
+**Tier:** Build (Sonnet)
 
 ---
 

@@ -141,6 +141,7 @@ standard PyPI, not the pytorch index URL.
 ```
 initial_research/     research record — READ ONLY for agents
 implementation/       specs, briefs, testing philosophy (this folder)
+implementation/07_model_tiering.md   who does what: Opus leads, Sonnet builds, Haiku runs
 src/                  the code you write
 tests/                the tests you write
 reports/              results pushed to main for the human — lead writes these

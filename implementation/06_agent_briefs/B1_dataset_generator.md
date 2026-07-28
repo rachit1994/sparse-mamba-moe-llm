@@ -5,6 +5,7 @@
 **Read first:** [`../00_START_HERE.md`](../00_START_HERE.md) ·
 [`../04_golden_dataset.md`](../04_golden_dataset.md) (your spec) ·
 [`../03_edge_cases_and_scares.md`](../03_edge_cases_and_scares.md) S2, S4, and the dataset table
+**Tier:** Build (Sonnet)
 
 ---
 

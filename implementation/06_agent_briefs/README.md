@@ -34,11 +34,11 @@ the project's output is a single scalar, and scalars are trivially faked
 
 ## Current briefs
 
-| Brief | Owns | Spec | Status |
-|---|---|---|---|
-| [B1 — dataset generator](B1_dataset_generator.md) | `src/data/generate.py`, `tests/test_data_generate.py` | [04](../04_golden_dataset.md) | in progress |
-| [B2 — bits metric](B2_bits_metric.md) | `src/metrics/bits.py`, `tests/test_metrics_bits.py` | [04 §4](../04_golden_dataset.md) | in progress |
-| [B3 — baseline model + training](B3_baseline_model.md) | `src/models/`, `src/train.py`, `tests/test_models_*.py` | [01 P1](../01_phases_and_gates.md) | queued |
+| Brief | Tier | Owns | Spec | Status |
+|---|---|---|---|---|
+| [B1 — dataset generator](B1_dataset_generator.md) | Build (Sonnet) | `src/data/generate.py`, `tests/test_data_generate.py` | [04](../04_golden_dataset.md) | done |
+| [B2 — bits metric](B2_bits_metric.md) | Build (Sonnet) | `src/metrics/bits.py`, `tests/test_metrics_bits.py` | [04 §4](../04_golden_dataset.md) | done |
+| [B3 — baseline model + training](B3_baseline_model.md) | Build (Sonnet) | `src/models/`, `src/train.py`, `tests/test_models_*.py` | [01 P1](../01_phases_and_gates.md) | done |
 
 `src/data/schema.py` is **lead-owned and read-only for all agents.** It fixes the attribute
 cardinalities that dataset entropy is derived from; a silent change there would not raise an
