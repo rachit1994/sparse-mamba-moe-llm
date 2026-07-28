@@ -14,14 +14,27 @@ Pipeline, in order, all driven by one ``(n_people, seed)`` pair:
    per call, so runs never collide and nothing is left on disk).
 2. :func:`src.data.tokenizer.build_tokenizer` -- the closed, word-level
    vocabulary (``vocab_size == 2818``).
-3. Training text is tokenized and padded (never truncated -- see
-   :class:`TrainingTextTooLongError`) to ``config.block_size``, then handed to
-   :func:`src.train.train_loop` as its ``data`` argument. ``steps=0`` runs the
-   identical construction path (seeded model init, optimizer, batcher) with
-   zero optimizer steps -- this is what makes it a legitimate **null-model**
-   control (implementation/02_testing_philosophy.md section 2, C1): the null
-   model is not a different code path, it is this same pipeline stopped before
-   the first gradient step.
+3. Training text is built by calling :func:`src.data.generate.render_training_text`
+   ``exposures_per_person`` times per train-split person (each call independently
+   draws a template per attribute via its own seeded RNG), tokenized, and padded
+   (never truncated -- see :class:`TrainingTextTooLongError`) to
+   ``config.block_size``. This is deliberately *not* just tokenizing
+   ``write_dataset``'s single on-disk paragraph per person: an early version of
+   this pipeline did exactly that and, at the tiny scale P0 tests must run at,
+   produced only a fragile, thread-count-sensitive, transiently-positive probe
+   signal that *decreased* with more training steps (memorisation of the one
+   fixed phrasing crowding out generalisation to probe's held-out phrasings).
+   That is exactly the phenomenon implementation/04_golden_dataset.md section 3
+   documents and predicts: "with a single fixed phrasing, knowledge is stored
+   but not extractable." ``exposures_per_person > 1`` gives the model several
+   independently-templated paraphrasings of the same fact, which is what makes
+   the extracted knowledge robust rather than a training-step lottery. The
+   resulting tensor is handed to :func:`src.train.train_loop` as its ``data``
+   argument. ``steps=0`` runs the identical construction path (seeded model
+   init, optimizer, batcher) with zero optimizer steps -- this is what makes it
+   a legitimate **null-model** control (implementation/02_testing_philosophy.md
+   section 2, C1): the null model is not a different code path, it is this same
+   pipeline stopped before the first gradient step.
 4. Each (person, attribute) probe/unseen-person record is encoded with
    :meth:`src.data.tokenizer.Tokenizer.encode_qa`, run through the model, shifted
    with :func:`src.models.tiny_lm.causal_lm_shift`, and scored with
@@ -51,6 +64,7 @@ accordingly when reporting it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -58,10 +72,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import numpy as np
 import torch
 
-from src.data.generate import write_dataset
-from src.data.schema import ATTRIBUTES, Split, dataset_entropy_bits
+from src.data.generate import generate_people, render_training_text, write_dataset
+from src.data.schema import ATTRIBUTES, Person, Split, dataset_entropy_bits
 from src.data.tokenizer import PAD, Tokenizer, build_tokenizer
 from src.metrics.bits import (
     EntropyBoundViolation,
@@ -87,6 +102,13 @@ __all__ = [
 # question/answer records (it is declarative text) and Split.SEALED is
 # deliberately excluded -- see the module docstring's "Scope note".
 EVAL_SPLITS: Final[tuple[str, ...]] = (Split.PROBE, Split.UNSEEN_PERSON)
+
+# Default number of independently-templated training paraphrasings per
+# train-split person -- see the module docstring's point 3 for why this is not
+# 1. 3 was the smallest value that gave a stable (non-transient, thread-count-
+# insensitive) positive probe signal in manual experimentation at this
+# pipeline's tiny test scale; see reports for the exact numbers.
+_DEFAULT_EXPOSURES_PER_PERSON: Final[int] = 3
 
 # Margin on the total-bits entropy-bound check, in bits. `bits_recovered_per_attribute`
 # already enforces this per item at a tolerance of 1e-4 bits; summing up to
@@ -165,46 +187,96 @@ def _read_jsonl(path: Path) -> list[dict]:
     return records
 
 
-def _tokenize_training_corpus(
-    train_records: list[dict], tokenizer: Tokenizer, block_size: int
-) -> torch.Tensor:
-    """Tokenize every training paragraph and right-pad to ``block_size``.
+def _child_seed(seed: int, label: str) -> int:
+    """Deterministically derive an independent, non-negative child seed.
 
-    Right-padding (rather than left-padding) is what keeps this safe under
-    this model's causal attention: a pad token at position ``t`` can only
-    attend to (and only be attended *from* by later positions that are
-    themselves never scored), so padding after the real content never
-    perturbs the logits at any position that is actually used as a next-token
-    training target for real content.
+    Same technique as ``src.data.generate._derive_seed`` (SHA-256 of
+    ``f"{seed}:{label}"``), reimplemented locally rather than importing that
+    private helper across a module boundary: it is a small, generic,
+    self-contained utility, and this keeps this module's dependency on
+    ``src.data.generate`` limited to that module's public API.
 
     Args:
-        train_records: one dict per person, each with a ``"text"`` key (as
-            written by ``write_dataset`` for the train split), and a
-            ``"person_id"`` key used only for error messages.
+        seed: the caller's top-level determinism seed.
+        label: distinguishes independent derived streams from the same seed.
+
+    Returns:
+        A non-negative int suitable for ``numpy.random.default_rng``.
+    """
+    digest = hashlib.sha256(f"{seed}:{label}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _build_train_corpus(
+    train_people: list[Person],
+    tokenizer: Tokenizer,
+    block_size: int,
+    seed: int,
+    exposures_per_person: int,
+) -> torch.Tensor:
+    """Render, tokenize, and right-pad ``exposures_per_person`` paraphrasings per person.
+
+    Each exposure independently calls :func:`src.data.generate.render_training_text`
+    (which itself draws one template per attribute from that attribute's >=5-template
+    pool), so different exposures of the same person are, in general, differently
+    phrased -- see the module docstring's point 3 for why this matters. All
+    randomness is drawn from one ``numpy.random.Generator`` seeded deterministically
+    from ``(seed, "integration_train_exposures")`` via :func:`_child_seed`, so the
+    entire corpus is reproducible from ``seed`` alone and independent of any other
+    RNG stream this pipeline touches (dataset generation, model init).
+
+    Right-padding (rather than left-padding) is what keeps this safe under this
+    model's causal attention: a pad token at position ``t`` can only attend to
+    (and only be attended *from* by later positions that are themselves never
+    scored), so padding after the real content never perturbs the logits at any
+    position that is actually used as a next-token training target for real
+    content.
+
+    Args:
+        train_people: the train-split ``Person`` objects, in a fixed
+            (caller-determined) order -- row order in the output is
+            ``exposures_per_person`` blocks, each iterating ``train_people`` in
+            this same order, so two calls with the same ``train_people`` order
+            are bit-identical.
         tokenizer: the closed-vocabulary tokenizer to encode with.
         block_size: target sequence length; every row of the returned tensor
             is exactly this long.
+        seed: determinism seed for template selection (see above).
+        exposures_per_person: how many independently-templated paraphrasings
+            to render per person. Must be a positive int.
 
     Returns:
-        Token ids, shape ``(len(train_records), block_size)``, dtype
-        ``torch.long``.
+        Token ids, shape ``(len(train_people) * exposures_per_person,
+        block_size)``, dtype ``torch.long``.
 
     Raises:
-        TrainingTextTooLongError: if any record's text encodes to more than
-            ``block_size`` tokens.
+        ValueError: if ``exposures_per_person`` is not a positive int, or if
+            ``train_people`` is empty.
+        TrainingTextTooLongError: if any rendered paragraph encodes to more
+            than ``block_size`` tokens.
         src.data.tokenizer.OutOfVocabularyError: propagated from ``encode``.
     """
+    if isinstance(exposures_per_person, bool) or not isinstance(exposures_per_person, int) or exposures_per_person <= 0:
+        raise ValueError(
+            f"exposures_per_person must be a positive int, got {exposures_per_person!r}"
+        )
+    if not train_people:
+        raise ValueError("train_people is empty; nothing to build a training corpus from")
+
     pad_id = tokenizer.encode(PAD)[0]
+    rng = np.random.default_rng(_child_seed(seed, "integration_train_exposures"))
     rows: list[list[int]] = []
-    for record in train_records:
-        ids = tokenizer.encode(record["text"])
-        if len(ids) > block_size:
-            raise TrainingTextTooLongError(
-                f"person {record['person_id']!r} rendered training text encodes to "
-                f"{len(ids)} tokens, exceeding config.block_size={block_size}; "
-                f"increase block_size rather than truncating training data"
-            )
-        rows.append(ids + [pad_id] * (block_size - len(ids)))
+    for _ in range(exposures_per_person):
+        for person in train_people:
+            text = " ".join(render_training_text(person, rng))
+            ids = tokenizer.encode(text)
+            if len(ids) > block_size:
+                raise TrainingTextTooLongError(
+                    f"person {person.person_id!r} rendered training text encodes to "
+                    f"{len(ids)} tokens, exceeding config.block_size={block_size}; "
+                    f"increase block_size rather than truncating training data"
+                )
+            rows.append(ids + [pad_id] * (block_size - len(ids)))
     return torch.tensor(rows, dtype=torch.long)
 
 
@@ -307,6 +379,7 @@ def run_pipeline(
     steps: int,
     *,
     eval_split: str = Split.PROBE,
+    exposures_per_person: int = _DEFAULT_EXPOSURES_PER_PERSON,
     batch_size: int = 4,
     lr: float = 3e-4,
     weight_decay: float = 0.0,
@@ -345,6 +418,9 @@ def run_pipeline(
             :data:`EVAL_SPLITS` (``Split.PROBE`` or ``Split.UNSEEN_PERSON`` --
             ``Split.SEALED`` is deliberately unreachable here, see the module
             docstring's "Scope note"; ``Split.TRAIN`` has no QA records).
+        exposures_per_person: independently-templated training paraphrasings
+            per train-split person (see the module docstring's point 3 and
+            :func:`_build_train_corpus`). Must be a positive int.
         batch_size: training batch size, capped to the number of train
             examples if smaller (``ToyBatcher`` requires ``batch_size <=
             n_examples``).
@@ -393,8 +469,19 @@ def run_pipeline(
         out_dir = Path(tmp)
         manifest = write_dataset(out_dir, n_people, seed)
 
-        train_records = _read_jsonl(out_dir / manifest["splits"][Split.TRAIN]["path"])
-        data = _tokenize_training_corpus(train_records, tokenizer, config.block_size)
+        train_ids = {
+            record["person_id"]
+            for record in _read_jsonl(out_dir / manifest["splits"][Split.TRAIN]["path"])
+        }
+        # generate_people(n_people, seed) is the same deterministic call
+        # write_dataset made internally (implementation detail of that
+        # function, not relied on beyond "same (n_people, seed) -> same
+        # people" -- src/data/generate.py's own documented determinism
+        # contract), so filtering its output by the person_ids write_dataset
+        # actually assigned to the train split reconstructs exactly the
+        # train-split Person objects, in index order.
+        train_people = [p for p in generate_people(n_people, seed) if p.person_id in train_ids]
+        data = _build_train_corpus(train_people, tokenizer, config.block_size, seed, exposures_per_person)
 
         train_result = train_loop(
             config=config,
@@ -456,6 +543,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, required=True, help="determinism seed")
     parser.add_argument("--steps", type=int, required=True, help="optimizer steps (0 = null model)")
     parser.add_argument("--eval-split", type=str, default=Split.PROBE, choices=list(EVAL_SPLITS))
+    parser.add_argument(
+        "--exposures-per-person",
+        type=int,
+        default=_DEFAULT_EXPOSURES_PER_PERSON,
+        help="independently-templated training paraphrasings per train-split person",
+    )
     parser.add_argument("--n-layer", type=int, default=2)
     parser.add_argument("--n-head", type=int, default=2)
     parser.add_argument("--d-model", type=int, default=64)
@@ -486,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             steps=args.steps,
             eval_split=args.eval_split,
+            exposures_per_person=args.exposures_per_person,
             batch_size=args.batch_size,
             lr=args.lr,
             weight_decay=args.weight_decay,
