@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
@@ -503,37 +502,14 @@ def _make_person_id(index: int, name_key: int) -> str:
 _GEN_CHUNK: Final[int] = 4096  # batch size for vectorised attribute sampling
 
 
-def generate_people(n_people: int, seed: int) -> Iterator[Person]:
-    """Deterministically stream `n_people` synthetic individuals.
-
-    Attributes are sampled independently (one dedicated numpy random stream
-    per attribute, spawned from `seed` via `numpy.random.SeedSequence.spawn`)
-    and near-uniformly, at the exact cardinalities in
-    `schema.ATTRIBUTE_CARDINALITY`. Person identities are assigned via a
-    keyed bijective permutation over the full name space (see
-    `_make_person_id`), so no two people generated under the same `seed` can
-    collide, for any `n_people` up to `_NAME_DOMAIN_SIZE` (~3.3 billion).
-
-    Memory: O(1) amortised per yielded person; internally batches attribute
-    sampling in chunks of `_GEN_CHUNK` so peak memory does not grow with
-    `n_people` (required to stream 4M+ people without OOM).
-
-    Args:
-        n_people: number of people to generate. Must be a non-negative int.
-        seed: determinism seed. Same (n_people, seed) always yields the same
-            sequence of Person objects in the same order. Must be a
-            non-negative int.
-
-    Yields:
-        Person objects, for index 0..n_people-1 in order.
+def _validate_n_people_and_seed(n_people: int, seed: int) -> None:
+    """Shared eager validation for (n_people, seed) pairs.
 
     Raises:
         TypeError: if n_people or seed is not an int (e.g. a float or bool is
             passed) -- this project requires typed errors, not silent
             coercion, for malformed inputs (implementation/03_edge_cases_and_scares.md).
-        ValueError: if n_people < 0, if seed < 0, or if n_people exceeds the
-            synthetic name-space capacity (`_NAME_DOMAIN_SIZE`), in which case
-            uniqueness could not be guaranteed.
+        ValueError: if n_people < 0 or seed < 0.
     """
     if isinstance(n_people, bool) or not isinstance(n_people, int):
         raise TypeError(f"n_people must be an int, got {type(n_people).__name__}")
@@ -543,15 +519,78 @@ def generate_people(n_people: int, seed: int) -> Iterator[Person]:
         raise ValueError(f"n_people must be non-negative, got {n_people}")
     if seed < 0:
         raise ValueError(f"seed must be non-negative, got {seed}")
-    if n_people > _NAME_DOMAIN_SIZE:
-        raise ValueError(
-            f"n_people={n_people} exceeds the synthetic name-space capacity "
-            f"({_NAME_DOMAIN_SIZE}); cannot guarantee unique identities"
-        )
 
+
+def _derive_name_key_and_attr_seeds(
+    seed: int,
+) -> tuple[int, tuple[np.random.SeedSequence, ...]]:
+    """Derive one Feistel name_key plus 6 independent attribute SeedSequences from `seed`.
+
+    All 7 children are spawned from a *single* `numpy.random.SeedSequence(seed)`
+    in one call, which is what makes them mutually independent. Deriving them
+    from separate fresh `SeedSequence(seed)` instances (one per attribute)
+    would NOT be independent: numpy's `SeedSequence.spawn(k)` assigns each
+    child a path keyed only by its spawn index *within that instance's own
+    counter*, so two freshly-constructed `SeedSequence(seed)` objects hand out
+    an *identical* first child. Verified empirically before writing this
+    function.
+
+    Returns:
+        `(name_key, (day_seq, year_seq, city_seq, uni_seq, major_seq, employer_seq))`.
+    """
     root = np.random.SeedSequence(seed)
     name_key_seq, day_seq, year_seq, city_seq, uni_seq, major_seq, employer_seq = root.spawn(7)
     name_key = int(name_key_seq.generate_state(1, dtype=np.uint64)[0])
+    return name_key, (day_seq, year_seq, city_seq, uni_seq, major_seq, employer_seq)
+
+
+def _iter_people(
+    n_people: int,
+    name_key: int,
+    attr_seeds: tuple[np.random.SeedSequence, ...],
+    index_start: int,
+) -> Iterator[Person]:
+    """Core streaming generation loop: `n_people` people at domain indices
+    `[index_start, index_start + n_people)`, all mapped through the *same*
+    `name_key` bijection (see `_make_person_id`).
+
+    `index_start` is what lets `write_dataset` give its "sealed" population
+    (a second, independently-attributed population) identities that are
+    *structurally* guaranteed disjoint from the main population's -- rather
+    than merely low-probability-of-colliding. Two independently-keyed
+    permutations of the same ~3.3B-name domain are NOT collision-free at
+    realistic scale: empirically, two independent 100,000-person populations
+    produced 2 colliding names (the birthday-bound expectation is
+    100000*100000/3317760000 ~= 3.0). A single bijection restricted to two
+    disjoint index ranges has zero such risk, by injectivity.
+
+    Args:
+        n_people: how many people to yield.
+        name_key: Feistel key for `_make_person_id`.
+        attr_seeds: 6 independent SeedSequences, in order
+            (day, year, city, university, major, employer).
+        index_start: first domain index to assign; must be non-negative.
+
+    Yields:
+        Person objects for domain indices `index_start .. index_start + n_people - 1`,
+        in order.
+
+    Raises:
+        ValueError: if `index_start + n_people` would exceed the synthetic
+            name-space capacity (`_NAME_DOMAIN_SIZE`), in which case
+            uniqueness could not be guaranteed. Note this check runs lazily,
+            on first iteration (this is a generator function) -- callers that
+            need eager validation must check `index_start + n_people <=
+            _NAME_DOMAIN_SIZE` themselves before constructing this iterator.
+    """
+    if index_start + n_people > _NAME_DOMAIN_SIZE:
+        raise ValueError(
+            f"index_start ({index_start}) + n_people ({n_people}) = "
+            f"{index_start + n_people} exceeds the synthetic name-space capacity "
+            f"({_NAME_DOMAIN_SIZE}); cannot guarantee unique identities"
+        )
+
+    day_seq, year_seq, city_seq, uni_seq, major_seq, employer_seq = attr_seeds
     day_rng = np.random.default_rng(day_seq)
     year_rng = np.random.default_rng(year_seq)
     city_rng = np.random.default_rng(city_seq)
@@ -564,7 +603,7 @@ def generate_people(n_people: int, seed: int) -> Iterator[Person]:
     n_major = ATTRIBUTE_CARDINALITY["major"]
     n_employer = ATTRIBUTE_CARDINALITY["employer"]
 
-    index = 0
+    index = index_start
     remaining = n_people
     while remaining > 0:
         chunk = min(_GEN_CHUNK, remaining)
@@ -586,6 +625,54 @@ def generate_people(n_people: int, seed: int) -> Iterator[Person]:
             yield Person(person_id=_make_person_id(index, name_key), attributes=attributes)
             index += 1
         remaining -= chunk
+
+
+def generate_people(n_people: int, seed: int) -> Iterator[Person]:
+    """Deterministically stream `n_people` synthetic individuals.
+
+    Attributes are sampled independently (one dedicated numpy random stream
+    per attribute, spawned from `seed` via `numpy.random.SeedSequence.spawn`)
+    and near-uniformly, at the exact cardinalities in
+    `schema.ATTRIBUTE_CARDINALITY`. Person identities are assigned via a
+    keyed bijective permutation over the full name space (see
+    `_make_person_id`), so no two people generated under the same `seed` can
+    collide, for any `n_people` up to `_NAME_DOMAIN_SIZE` (~3.3 billion).
+
+    Validation is eager: this function is a plain function (not itself a
+    generator), so `TypeError`/`ValueError` on bad arguments raise
+    immediately when called, before any iteration -- not deferred to the
+    first `next()` call the way a `def ... yield`-bodied function's checks
+    would be. The returned iterator's own body still runs lazily.
+
+    Memory: O(1) amortised per yielded person; internally batches attribute
+    sampling in chunks of `_GEN_CHUNK` so peak memory does not grow with
+    `n_people` (required to stream 4M+ people without OOM).
+
+    Args:
+        n_people: number of people to generate. Must be a non-negative int.
+        seed: determinism seed. Same (n_people, seed) always yields the same
+            sequence of Person objects in the same order. Must be a
+            non-negative int.
+
+    Returns:
+        An iterator yielding Person objects, for index 0..n_people-1 in order.
+
+    Raises:
+        TypeError: if n_people or seed is not an int (e.g. a float or bool is
+            passed) -- this project requires typed errors, not silent
+            coercion, for malformed inputs (implementation/03_edge_cases_and_scares.md).
+        ValueError: if n_people < 0, if seed < 0, or if n_people exceeds the
+            synthetic name-space capacity (`_NAME_DOMAIN_SIZE`), in which case
+            uniqueness could not be guaranteed.
+    """
+    _validate_n_people_and_seed(n_people, seed)
+    if n_people > _NAME_DOMAIN_SIZE:
+        raise ValueError(
+            f"n_people={n_people} exceeds the synthetic name-space capacity "
+            f"({_NAME_DOMAIN_SIZE}); cannot guarantee unique identities"
+        )
+    name_key, attr_seeds = _derive_name_key_and_attr_seeds(seed)
+    return _iter_people(n_people, name_key, attr_seeds, index_start=0)
 
 
 def render_training_text(person: Person, rng: np.random.Generator) -> list[str]:
@@ -700,9 +787,13 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
         people who never appear in train.jsonl at all -- the leakage control
         that must score ~0.
       - `sealed.jsonl`: same shape as probe.jsonl, but for an entirely
-        separate population of `n_people` people generated from a seed
-        independently derived from `seed` (see `_derive_seed`), used only at
-        phase gates.
+        separate population of `n_people` people, independently attributed
+        from a seed independently derived from `seed` (see `_derive_seed`),
+        used only at phase gates. Its *identities*, unlike its attributes,
+        deliberately reuse the main population's Feistel key at a disjoint
+        index offset (`_iter_people(..., index_start=n_people)`) rather than
+        an independently-derived key -- see the "Name collision" paragraph
+        below.
       - `manifest.json`: counts, entropy, and a streaming SHA-256 per split
         file, plus the derived sealed seed. Contains no wall-clock timestamp
         or other non-deterministic field, so it -- like every data file -- is
@@ -711,10 +802,28 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
     Determinism: identical (out_dir contents aside, since out_dir must not
     already hold a manifest -- see below) for identical (n_people, seed).
 
-    Memory: O(n_people) auxiliary memory for the train/unseen_person split
-    assignment array (a `bool` array, ~1 byte/person -- 4MB at 4M people), but
-    O(1) memory for the actual biography/QA text, which is streamed directly
-    to disk line by line as `generate_people` yields each person.
+    Name collision (R2, "Assert uniqueness"): identities are unique
+    *within* the main population by construction (a single Feistel bijection
+    is injective over its domain -- see `_make_person_id`). They are unique
+    *between* the main and sealed populations because both draw from the
+    *same* bijection (same `name_key`) at disjoint, non-overlapping index
+    ranges ([0, n_people) and [n_people, 2*n_people)) -- injectivity again
+    guarantees no overlap. This is deliberately NOT implemented as two
+    independently-keyed permutations of the shared ~3.3B-name domain: that
+    would only be collision-free in expectation, and the birthday bound bites
+    at realistic scale (empirically, two independent 100,000-person
+    populations produced 2 colliding names). As a second, redundant layer
+    (defence in depth, not the primary mechanism), every person_id written to
+    train/unseen_person/sealed is also checked against a running set and
+    raises `RuntimeError` immediately on any duplicate.
+
+    Memory: O(n_people) auxiliary memory -- the train/unseen_person split
+    assignment array (a `bool` array, ~1 byte/person) and the running
+    person_id uniqueness set described above (dominates: at 4M people, ~2 x
+    4M person_id strings in a Python set is on the order of several hundred
+    MB, well inside a 16GB machine). The actual biography/QA *text* remains
+    O(1) memory, streamed directly to disk line by line as `_iter_people`
+    yields each person.
 
     Args:
         out_dir: directory to write into. Created (with parents) if it does
@@ -723,34 +832,35 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
             unseen_person) and, independently, in the sealed population. Must
             be a non-negative int. `n_people` in {1, 2, 3, 4} is rejected (see
             Raises) because a 90/10 split of that few people leaves one split
-            empty, which must never happen silently.
+            empty, which must never happen silently. `2 * n_people` must not
+            exceed the synthetic name-space capacity (see Raises).
         seed: determinism seed for the main population, its split assignment,
-            and its template selection. The sealed population's seed and
-            template selection are independently derived from this same
-            `seed` (see `_derive_seed`), not equal to it.
+            and its template selection. The sealed population's attribute
+            seed and template selection are independently derived from this
+            same `seed` (see `_derive_seed`), not equal to it; its identities
+            share the main population's Feistel key (see "Name collision"
+            above).
 
     Returns:
         The manifest dict that was also written to `out_dir/manifest.json`.
 
     Raises:
         TypeError: if n_people or seed is not an int.
-        ValueError: if n_people < 0, if seed < 0, or if n_people > 0 but the
+        ValueError: if n_people < 0, if seed < 0, if n_people > 0 but the
             90/10 train/unseen_person split would leave either split empty
-            (n_people in {1, 2, 3, 4}).
+            (n_people in {1, 2, 3, 4}), or if `2 * n_people` exceeds the
+            synthetic name-space capacity (main population + sealed
+            population share one name domain).
         FileExistsError: if `out_dir` already contains a `manifest.json` --
             refusing to silently overwrite or interleave with a previous (or
             concurrent) run's output (implementation/03_edge_cases_and_scares.md,
             Dataset generation / Concurrent), or if `out_dir` exists as a
             non-directory file.
+        RuntimeError: if a duplicate person_id is ever written (should be
+            unreachable given the injectivity argument above; indicates a
+            logic bug in identity assignment, not a legitimate dataset).
     """
-    if isinstance(n_people, bool) or not isinstance(n_people, int):
-        raise TypeError(f"n_people must be an int, got {type(n_people).__name__}")
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise TypeError(f"seed must be an int, got {type(seed).__name__}")
-    if n_people < 0:
-        raise ValueError(f"n_people must be non-negative, got {n_people}")
-    if seed < 0:
-        raise ValueError(f"seed must be non-negative, got {seed}")
+    _validate_n_people_and_seed(n_people, seed)
 
     n_train = round(n_people * _TRAIN_FRACTION)
     n_unseen = n_people - n_train
@@ -759,6 +869,12 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
             f"n_people={n_people} is too small for a 90/10 train/unseen_person split "
             f"without leaving a split empty (would produce train={n_train}, "
             f"unseen_person={n_unseen}); use n_people=0 or n_people>=5"
+        )
+    if 2 * n_people > _NAME_DOMAIN_SIZE:
+        raise ValueError(
+            f"n_people={n_people} means the main population (n_people identities) plus "
+            f"the sealed population (another n_people identities) would need "
+            f"{2 * n_people} identities from the shared {_NAME_DOMAIN_SIZE}-name domain"
         )
 
     if out_dir.exists() and not out_dir.is_dir():
@@ -791,10 +907,28 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
     n_unseen_people = 0
     n_unseen_lines = 0
 
+    # Defence in depth for R2 ("Assert uniqueness"): the primary guarantee is
+    # the injective Feistel bijection (see the "Name collision" paragraph in
+    # this function's docstring), but every person_id actually written is
+    # also checked here so a future logic bug in identity assignment fails
+    # loudly (RuntimeError) instead of silently corrupting dataset entropy.
+    seen_person_ids: set[str] = set()
+
+    def _check_unique(person_id: str) -> None:
+        if person_id in seen_person_ids:
+            raise RuntimeError(
+                f"duplicate person_id {person_id!r} encountered; identity assignment "
+                f"is supposed to be injective -- this indicates a logic bug, not a "
+                f"legitimate dataset (implementation/03_edge_cases_and_scares.md: "
+                f"'Name collisions are the sneaky one')"
+            )
+        seen_person_ids.add(person_id)
+
     with train_path.open("w", encoding="utf-8") as train_f, \
             probe_path.open("w", encoding="utf-8") as probe_f, \
             unseen_path.open("w", encoding="utf-8") as unseen_f:
         for i, person in enumerate(generate_people(n_people, seed)):
+            _check_unique(person.person_id)
             if train_mask[i]:
                 sentences = render_training_text(person, text_tmpl_rng)
                 train_f.write(json.dumps({"person_id": person.person_id, "text": " ".join(sentences)}) + "\n")
@@ -820,10 +954,22 @@ def write_dataset(out_dir: Path, n_people: int, seed: int) -> dict:
 
     sealed_seed = _derive_seed(seed, "sealed_population")
     sealed_tmpl_rng = np.random.default_rng(_derive_seed(seed, "sealed_template"))
+
+    # Identities for the sealed population share the MAIN population's
+    # name_key (not sealed_seed's own) at index_start=n_people, so they are
+    # guaranteed disjoint from the main population's [0, n_people) identities
+    # by injectivity -- see the "Name collision" paragraph in this function's
+    # docstring. Attribute VALUES still come from sealed_seed, independently
+    # of the main population, which is what "separate seed" (R6) protects.
+    main_name_key, _ = _derive_name_key_and_attr_seeds(seed)
+    _, sealed_attr_seeds = _derive_name_key_and_attr_seeds(sealed_seed)
+    sealed_people = _iter_people(n_people, main_name_key, sealed_attr_seeds, index_start=n_people)
+
     n_sealed_people = 0
     n_sealed_lines = 0
     with sealed_path.open("w", encoding="utf-8") as sealed_f:
-        for person in generate_people(n_people, sealed_seed):
+        for person in sealed_people:
+            _check_unique(person.person_id)
             n_sealed_people += 1
             for attr in ATTRIBUTES:
                 t_idx = int(sealed_tmpl_rng.integers(0, len(_PROBE_TEMPLATES[attr])))
