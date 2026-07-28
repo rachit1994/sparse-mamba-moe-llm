@@ -40,7 +40,8 @@ PROCEED / INVESTIGATE / STOP  — against which gate, and why
 
 | # | Phase | Verdict | Date |
 |---|---|---|---|
-| [001](001_P0_harness.md) | P0 harness correctness | **INVESTIGATE** — components verified, integration missing | 2026-07-28 |
+| [001](001_P0_harness.md) | P0 harness correctness | INVESTIGATE — integration missing (superseded by 002) | 2026-07-28 |
+| [002](002_P0_controls_pass.md) | P0 controls | **PASS** — apparatus reads the model, not the harness | 2026-07-28 |
 
 ## Standing rules
 
