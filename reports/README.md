@@ -40,10 +40,7 @@ PROCEED / INVESTIGATE / STOP  — against which gate, and why
 
 | # | Phase | Verdict | Date |
 |---|---|---|---|
-| — | P0 harness correctness | in progress | — |
-
-*(No results yet. P0 is being built; the first report lands when its controls are demonstrated
-failing-when-broken, not when its tests go green.)*
+| [001](001_P0_harness.md) | P0 harness correctness | **INVESTIGATE** — components verified, integration missing | 2026-07-28 |
 
 ## Standing rules
 
