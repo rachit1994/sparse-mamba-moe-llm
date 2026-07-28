@@ -54,8 +54,23 @@ control and confirm it fires; hand-inspect 10 generated people.
 **Acceptance:**
 - [ ] Curve **plateaus** (saturation reached, not a straight line — S4)
 - [ ] Plateau ÷ parameter count reproduces **2.0 bits/param within ±25%** (1.5–2.5)
-- [ ] Runs at fp16 or int8, **not ternary** (H5 — ternary makes >2.0 arithmetically impossible)
+- [ ] **Each fact seen ~1000 times** (see the exposure box below) — non-negotiable
+- [ ] Runs at **int8 or fp16, never int4 or ternary** (see the precision box below)
 - [ ] Tier A vs Tier B gap reported (memorisation vs extractable)
+- [ ] Parameter-counting convention agrees with `src/metrics/bits.py::count_parameters`
+
+> ### ⚠️ Two conditions that will silently fail this gate
+>
+> **Exposure.** The 2.0 bits/param result requires each knowledge piece to be seen **~1000 times**
+> during training. At ~100 exposures an undertrained model reaches only **1.0 bits/param**.
+> **A single-epoch run cannot reach the baseline.** If P1 is run at low exposure it will fail, and
+> the failure will look like a harness bug or an architecture problem when it is neither. Both arms
+> must match on exposure count exactly.
+>
+> **Precision.** Capacity is precision-dependent and collapses below int8:
+> fp16 → 2.0, **int8 → 2.0 (no loss)**, **int4 → 0.7 (measured collapse)**, ternary → unmeasured and
+> presumed worse. int4 holds twice the parameters of int8 but *less* knowledge. **Run capacity
+> experiments at int8.** Any ternary number is an upper bound, not a result.
 
 **Kill condition — G1:**
 
