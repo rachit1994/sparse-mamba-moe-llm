@@ -35,15 +35,48 @@ Allen-Zhu & Li (*Physics of Language Models Part 3.3*, ICLR 2025) measured how m
 a parameter can hold: **2 bits per parameter**, robust down to int8. Their own calibration: a **7B
 model stores 14 Gbit — exceeding English Wikipedia and textbooks combined.**
 
-Applied to this machine's 6.5 GB weight budget:
+### CORRECTION — the first version of this section was too optimistic
 
-| Target | Bits | Fits in 52 Gbit? |
+An earlier draft claimed **3.7× headroom**, by assuming 2.0 bits/param holds at ternary and is capped
+only by the raw storage bound. That was wrong. The capacity law is **precision-dependent, and it
+collapses below int8**:
+
+| Precision | bytes/param | params in 6.5 GB | **measured** bits/param | Knowledge |
+|---|---:|---:|---:|---:|
+| fp16 | 2.00 | 3.2 B | 2.0 | 6.5 Gbit |
+| **int8** | 1.00 | 6.5 B | **2.0** (no loss) | **13.0 Gbit** ← best measured |
+| int4 | 0.50 | 13.0 B | **0.7** (measured collapse) | 9.1 Gbit |
+| ternary | 0.20 | 32.5 B | *0.7 extrapolated, unmeasured* | *22.8 Gbit — not a result* |
+
+**int4 holds twice the parameters of int8 but less knowledge (9.1 vs 13.0 Gbit).** Quantising below
+int8 is counterproductive for knowledge capacity. Ternary's apparent advantage rests entirely on an
+unmeasured assumption, and the measured trend is downward.
+
+Against the targets, using the best **measured** configuration (int8, 13.0 Gbit):
+
+| Target | Bits | Verdict |
 |---|---:|---|
-| English Wikipedia + textbooks | 14.0 Gb | **YES — 3.7× headroom** |
-| 30B-token web corpus (long tail) | 240.0 Gb | short by 4.6× |
-| 300B-token corpus (the Pile) | 2400.0 Gb | short by 46.2× |
+| English Wikipedia + textbooks | 14.0 Gb | **0.93× — parity, not headroom** |
+| 30B-token web corpus (long tail) | 240.0 Gb | short by 18× |
+| 300B-token corpus (the Pile) | 2400.0 Gb | short by 185× |
 
-**A fixed brain resident entirely in RAM holds Wikipedia-scale knowledge with 3.7× headroom.**
+**A fixed brain in RAM reaches roughly Wikipedia-scale parity — it does not clear it comfortably.**
+
+Two consequences:
+
+1. **The overflow tier is now *likely* to be needed, not merely possible.** Phase 2 must measure
+   where the boundary actually falls rather than assuming RAM suffices.
+2. **Beating 2.0 bits/param is not a vanity target.** At 2.0 the fixed brain sits at 0.93× of
+   Wikipedia+textbooks. The premise has to *win* for dynamics-first to stand without SSD overflow.
+
+### The exposure requirement, also missed initially
+
+**2.0 bits/param requires each fact to be seen ~1000 times during training.** At ~100 exposures an
+undertrained model reaches only **1.0 bits/param**.
+
+This is a direct threat to gate P1: **a single-epoch training run cannot reach the baseline**, and
+P1 would fail for reasons that have nothing to do with architecture. The training schedule must
+deliver ~1000 exposures per fact, and both arms must match on it exactly.
 
 And the tier comparison is damning for the old design:
 

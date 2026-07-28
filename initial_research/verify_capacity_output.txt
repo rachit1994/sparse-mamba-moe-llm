@@ -20,42 +20,56 @@ was in dispute. It says nothing about how many BITS can be stored.
 2. KNOWLEDGE CAPACITY OF A FIXED BRAIN (Allen-Zhu & Li: 2 bits/param)
 ==========================================================================
 Weight budget in RAM: 6.5 GB = 52 Gbit
-  ^ this is a HARD information ceiling: you cannot store more bits than you have.
+  ^ hard information ceiling: you cannot store more bits than you have.
 
-precision   bytes/param      params    2b/param   actual (capped)
-fp16               2.00       3.2B       6.5 Gb          6.5 Gb
-int8               1.00       6.5B      13.0 Gb         13.0 Gb
-int4               0.50      13.0B      26.0 Gb         26.0 Gb
-ternary            0.20      32.5B      65.0 Gb         52.0 Gb  <- storage-bound
+precision   B/param    params  cap b/p   knowledge  note
+fp16           2.00     3.2B      2.0       6.5 Gb  measured
+int8           1.00     6.5B      2.0      13.0 Gb  measured - no loss vs fp16
+int4           0.50    13.0B      0.7       9.1 Gb  MEASURED COLLAPSE, not a storage cap
+ternary        0.20    32.5B      0.7      22.8 Gb  EXTRAPOLATED from int4; unmeasured, trend is downward
 
-NOTE: Allen-Zhu verified 2 bits/param down to int8. Below int8 the law is
-      NOT verified, and the storage bound binds first. Treat int4/ternary
-      rows as UPPER bounds, not measurements. This is gate G-CAP.
+BEST MEASURED CONFIGURATION : int8 at 13.0 Gbit
+Largest number in the table : ternary at 22.8 Gbit  -- but that row is EXTRAPOLATED, so it is not a result.
+Planning uses the MEASURED figure. Ternary's apparent advantage rests
+entirely on an unmeasured assumption, and the measured trend is downward.
+KEY CONSEQUENCE: int4 holds 2x the PARAMETERS of int8 but LESS KNOWLEDGE
+  (9.1 Gbit vs 13.0 Gbit). Quantizing below int8 is counterproductive for
+  knowledge capacity. Ternary is worse still. Run capacity experiments at int8.
+
+EXPOSURE REQUIREMENT (the other thing that was missed):
+  2.0 bits/param requires each fact seen ~1000 times during training.
+  At ~100 exposures an undertrained model reaches only 1.0 bits/param.
+  => a 1-epoch training run CANNOT reach the baseline, and P1 would fail
+     its gate for reasons unrelated to architecture.
 
 ==========================================================================
 3. IS THAT ENOUGH? — what the ceiling actually buys
 ==========================================================================
-Fixed-brain ceiling in 6.5 GB: 52 Gbit
+Raw storage ceiling in 6.5 GB :   52.0 Gbit (unreachable)
+Best ACHIEVABLE (int8, measured)   :   13.0 Gbit
 
-  Allen-Zhu reference: 7B model           14.0 Gb   FITS
-      they estimate this EXCEEDS English Wikipedia + textbooks combined
-  English Wikipedia + textbooks           14.0 Gb   FITS
-      per the above
-  30B-token web corpus (long tail)       240.0 Gb   SHORT by 4.6x
+  English Wikipedia + textbooks           14.0 Gb   SHORT by 1.1x
+      Allen-Zhu's own estimate for a 7B model
+  30B-token web corpus (long tail)       240.0 Gb   SHORT by 18.5x
       ~4 chars/token, ~2 bits/char compressed
-  300B-token corpus (the Pile)          2400.0 Gb   SHORT by 46.2x
+  300B-token corpus (the Pile)          2400.0 Gb   SHORT by 184.6x
 
-=> CONCLUSION THAT REVERSED THE ARCHITECTURE:
-   A fixed brain resident in RAM holds Wikipedia-scale knowledge with
-   3.7x headroom. The 200 GB external memory bank in the earlier
-   design was over-engineered for anything short of web-scale long tail --
-   and it moved knowledge onto the SLOWEST component in the machine.
+=> CORRECTED CONCLUSION (supersedes the '3.7x headroom' claim):
+   A fixed brain in 6.5 GB reaches 13.0 Gbit at int8, versus
+   ~14 Gbit for Wikipedia+textbooks: 0.93x. That is PARITY, NOT HEADROOM.
+   The earlier 3.7x figure assumed 2.0 bits/param at ternary; the measured
+   int4 collapse to 0.7 says that assumption was wrong and optimistic.
+
+   The architecture decision still stands -- RAM is 28x faster than SSD and
+   is still the right tier for the load-bearing knowledge -- but the margin
+   is gone. The conditional overflow tier is now LIKELY to be needed, not
+   merely possible, and Phase 2 must measure where the boundary actually is.
 
 ==========================================================================
 4. WHERE THE KNOWLEDGE SHOULD LIVE — bandwidth comparison
 ==========================================================================
 tier                             bandwidth         holds   relative speed
-fixed brain (RAM)                    84 GB/s         52 Gb             28x
+fixed brain (RAM)                    84 GB/s         13 Gb             28x
 external bank (SSD)                   3 GB/s      ~1600 Gb              1x
 
 The earlier design put 97% of parameters on the tier that is 28x slower.
@@ -76,7 +90,11 @@ Question nobody has published an answer to:
              3.0                     PREMISE PROVEN, publishable
              4.0                     PREMISE PROVEN, publishable
 
-Capacity a fixed 6.5 GB brain would hold at each rate (ternary, 32.5B params):
-   1.0 b/param ->  32.5 Gbit =  2.3x Wikipedia+textbooks
-   2.0 b/param ->  52.0 Gbit =  3.7x Wikipedia+textbooks
-   4.0 b/param ->  52.0 Gbit =  3.7x Wikipedia+textbooks
+Capacity a fixed 6.5 GB brain would hold at each rate (int8, 6.5B params):
+   1.0 b/param ->   6.5 Gbit = 0.46x Wikipedia+textbooks
+   2.0 b/param ->  13.0 Gbit = 0.93x Wikipedia+textbooks
+   4.0 b/param ->  26.0 Gbit = 1.86x Wikipedia+textbooks
+
+   Beating 2.0 b/param is not a vanity target: at int8 the fixed brain is
+   at 0.93x Wikipedia+textbooks. The premise has to WIN for the
+   dynamics-first architecture to stand without an overflow tier.
