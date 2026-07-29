@@ -1,0 +1,45 @@
+
+==========================================================================
+P1 FEASIBILITY IN THIS CONTAINER (CONTAINER-ONLY)
+==========================================================================
+Peak matmul throughput (MEASURED): 114.0 GFLOP/s (4 CPU threads, torch 2.13.0+cu130)
+Training efficiency (ESTIMATED)  : 5%-20% of peak
+=> effective                     : 5.7-22.8 GFLOP/s
+Requirement: 1000 exposures/fact AND a saturating dataset
+
+model         params  N to saturate      tokens  days (opt)  days (pess)
+tiny          27,008          2,120    148.4 M        0.01         0.05
+100k         100,000          7,848    549.4 M        0.17         0.67
+1m         1,057,152         82,963   5807.4 M       18.71        74.83
+10m       10,844,160        851,023  59571.6 M     1968.36      7873.44
+
+Plan against the PESSIMISTIC column. A sweep needs 5-6 N values, so
+multiply again by that. Only rows under ~1 day pessimistic are usable.
+
+==========================================================================
+WHAT IS REACHABLE AT REDUCED EXPOSURES
+==========================================================================
+At fewer exposures the measured ceiling falls (1000 -> 2.0 b/param,
+100 -> 1.0 b/param), so these runs CANNOT be compared to the 2.0
+anchor. They can still validate the sweep machinery.
+
+Using the 'tiny' model (27,008 params, N=2,120 to saturate):
+
+ exposures       tokens    minutes*   valid for 2.0 anchor?
+        10      1.48 M         0.7     NO - machinery only
+        50      7.42 M         3.5     NO - machinery only
+       100     14.84 M         7.0     NO - machinery only
+      1000    148.40 M        70.3                     yes
+
+==========================================================================
+VERDICT
+==========================================================================
+At least one model config reaches the 1000-exposure saturating
+regime within a day in this container.
+
+* minutes column uses the PESSIMISTIC efficiency estimate.
+
+What the container CAN do: validate the sweep machinery end to end at
+reduced exposures, so that when it runs on the Mac mini the only
+unknown left is hardware behaviour. Reduced-exposure numbers must not
+be compared to the 2.0 anchor (mistake M4).
