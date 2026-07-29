@@ -1,0 +1,84 @@
+
+==========================================================================
+1. SUBSTRATE EFFICIENCY -- knowledge bits per substrate bit
+==========================================================================
+Shannon bound: eta <= 1.0
+
+scheme     bits/param  know/param     eta   headroom  source
+fp16             16.0        2.00   0.125       8.0x  Allen-Zhu & Li, measured
+int8              8.0        2.00   0.250       4.0x  Allen-Zhu & Li, no loss vs fp16
+int4              4.0        0.70   0.175       5.7x  Allen-Zhu & Li, measured collapse
+ternary           1.6        0.70   0.437       2.3x  EXTRAPOLATED from int4
+
+Best MEASURED efficiency : int8 at eta = 0.250
+Unexploited headroom     : 4x
+
+The thesis without reference to language models: transformers store
+knowledge at ~1/4 of the information-theoretic bound. Does a dynamical
+encoding close that gap?
+
+Note the inversion: ternary has the LOWEST bits/param yet the HIGHEST
+eta. Denominating in parameters reverses the ranking of schemes.
+
+==========================================================================
+2. WHAT THE TARGET SUBSTRATE HOLDS, BY SCHEME
+==========================================================================
+Substrate = 52 Gbit (6.5 GB)
+
+scheme         eta           holds
+fp16         0.125          6.5 Gbit
+int8         0.250         13.0 Gbit
+int4         0.175          9.1 Gbit
+ternary      0.437         22.7 Gbit   (extrapolated)
+Shannon      1.000         52.0 Gbit
+
+==========================================================================
+3. RETRIEVAL CAPACITY OF A DYNAMICAL SYSTEM
+==========================================================================
+For N = 10,000 units:
+
+  Hopfield retrievable patterns : 1,380
+    (Amit-Gutfreund-Sompolinsky, alpha_c = 0.138)
+  Sparse-code address space     : 803 bits
+  Raw substrate                 : 10,000 bits
+
+  Address space and storage capacity are different quantities.
+  A code can address 2^803 states and still store only 10,000 bits.
+
+==========================================================================
+4. WHERE THE THESIS CAN WIN -- structure, not volume
+==========================================================================
+On incompressible data no encoding beats another; Shannon forbids it.
+That is why the flat dataset cannot test the thesis (mistake M5).
+
+For 100,000 items:
+
+  generator                        memoriser   structure-finder   ratio
+  flat (incompressible)              5.10 Mbit                 --    1.0x
+  K=64, dev=8 bits                   5.10 Mbit          1.40 Mbit    3.6x
+  K=256, dev=12 bits                 5.10 Mbit          2.00 Mbit    2.5x
+  K=1024, dev=16 bits                5.10 Mbit          2.60 Mbit    2.0x
+
+  The ratio is ground truth from the generator, not a benchmark score.
+
+==========================================================================
+5. THE EXPERIMENT, STATED WITHOUT LANGUAGE MODELS
+==========================================================================
+
+  GIVEN   a substrate of S bits, and items from a generator whose true
+          entropy H is known by construction
+
+  MEASURE eta = (bits of generator content retrievable) / S
+
+  COMPARE encoding-as-static-weights  vs  encoding-as-dynamical-state
+
+  VARY    the latent structure of the generator, from incompressible
+          to highly structured
+
+  PREDICT eta_static  is flat in structure    (memorises either way)
+          eta_dynamic RISES with structure    (exploits regularity)
+
+  The claim under test is a SLOPE, not a scalar. Nothing here mentions
+  tokens, attention, or next-token prediction: those are one possible
+  read-out mechanism, not the object of study.
+
