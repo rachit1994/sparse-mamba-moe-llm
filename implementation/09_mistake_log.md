@@ -40,6 +40,7 @@
 | M11 | S2 | Lead | Tokenizer design would have produced a **3.3M-token vocabulary** (~425M embedding params, larger than the 100M preset) by fusing 4-digit name suffixes | Computing vocab size before committing to it | Vocabulary size is computed and asserted before any model is configured from it |
 | M12 | S3 | Lead | Own consistency test used a word absent from the closed corpus, so it failed | The tokenizer raised, correctly | Test inputs must be drawn from real generated text, never invented by hand |
 | M13 | S2 | Sonnet | Quoted "89 passed" as a full-suite result when one of four test files had been excluded for slowness | Lead noticed the file count | A suite result must state which files ran; partial runs are labelled partial |
+| M14 | S1 | Lead | Wrote a plateau detector thresholding an **arbitrary** gain ratio at 15%, with no stated relation to the quantity anyone cares about (capacity error). Also mislabelled a curve at 91% of ceiling a "textbook plateau" | Ran my own battery; it failed | Thresholds must be expressed in the units of the harm they prevent. Criterion is now "extrapolated remaining gain < 5% of measured value", i.e. a bound on capacity underestimate. Validated: predicted 9.98% remaining vs 10.0% ground truth |
 
 ---
 
